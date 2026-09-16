@@ -1437,6 +1437,12 @@ const SCRATCH_DIR_NAME: &str = "scratch";
 /// plaintext copies of synced financial rows. Writing those to the shared system
 /// temp directory reads badly at the best of times and worse once the product
 /// claims encryption at rest.
+/// Private staging under an explicitly selected profile root. Never resolves
+/// the installation-wide DATABASE_URL override.
+pub fn profile_scratch_dir(root: &str) -> Result<std::path::PathBuf> {
+    scratch_dir_beside(&Path::new(root).join("app.db"))
+}
+
 pub fn scratch_dir(app_data_dir: &str) -> Result<std::path::PathBuf> {
     scratch_dir_beside(Path::new(&get_db_path(app_data_dir)))
 }

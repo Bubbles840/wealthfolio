@@ -6,6 +6,9 @@ use crate::errors::Result;
 pub const SERVICE_PREFIX: &str = "wealthfolio_";
 
 /// Device enrollment identity and E2EE credentials.
+pub const CLOUD_REFRESH_TOKEN_KEY: &str = "sync_refresh_token";
+pub const CLOUD_ACCESS_TOKEN_KEY: &str = "sync_access_token";
+
 pub const SYNC_IDENTITY_KEY: &str = "sync_identity";
 
 /// Retired device ID entry; used only to clean up older installations.
@@ -57,6 +60,20 @@ pub fn validate_unscoped_secret_service_id(service: &str) -> std::result::Result
         return Err("Addon-scoped secrets must use the addon secret API".to_string());
     }
 
+    let normalized = service.to_ascii_lowercase();
+    if normalized.starts_with("profile:")
+        || [
+            crate::profiles::PROFILE_LOCK_KEY,
+            crate::profiles::DATABASE_KEY_SECRET,
+            CLOUD_REFRESH_TOKEN_KEY,
+            CLOUD_ACCESS_TOKEN_KEY,
+            SYNC_IDENTITY_KEY,
+            LEGACY_SYNC_DEVICE_ID_KEY,
+        ]
+        .contains(&normalized.as_str())
+    {
+        return Err("Internal credentials require their dedicated API".into());
+    }
     Ok(())
 }
 
@@ -80,6 +97,12 @@ pub fn legacy_addon_secret_service_id(
 /// the self-hosted web server) so the core crate remains focused on business
 /// logic.
 pub trait SecretStore: Send + Sync {
+    /// Logical key names only; secret values must never leave the store for cleanup.
+    fn list_secrets(&self) -> Result<Vec<String>> {
+        Err(crate::Error::Secret(
+            "Credential enumeration is unavailable.".into(),
+        ))
+    }
     fn set_secret(&self, service: &str, secret: &str) -> Result<()>;
     fn get_secret(&self, service: &str) -> Result<Option<String>>;
     fn delete_secret(&self, service: &str) -> Result<()>;
@@ -116,6 +139,16 @@ mod tests {
     fn validate_unscoped_secret_service_id_rejects_addon_namespace() {
         assert!(validate_unscoped_secret_service_id("market-data-provider").is_ok());
         assert!(validate_unscoped_secret_service_id("").is_err());
+        for key in [
+            "profile:other:sync_identity",
+            "PROFILE:other:profile_lock",
+            "profile_lock",
+            "database_encryption_key",
+            CLOUD_REFRESH_TOKEN_KEY,
+            SYNC_IDENTITY_KEY,
+        ] {
+            assert!(validate_unscoped_secret_service_id(key).is_err(), "{key}");
+        }
         assert!(validate_unscoped_secret_service_id("addon:example-addon:api_key").is_err());
         assert!(validate_unscoped_secret_service_id("ADDON:example-addon:api_key").is_err());
     }

@@ -11,8 +11,7 @@ use crate::request_metadata::{
     CLIENT_REQUEST_ID_HEADER,
 };
 
-pub const CLOUD_REFRESH_TOKEN_KEY: &str = "sync_refresh_token";
-pub const CLOUD_ACCESS_TOKEN_KEY: &str = "sync_access_token";
+pub use wealthfolio_core::secrets::{CLOUD_ACCESS_TOKEN_KEY, CLOUD_REFRESH_TOKEN_KEY};
 
 const DEFAULT_EXPIRY_BUFFER_SECS: u64 = 60;
 const DEFAULT_REFRESH_TIMEOUT_SECS: u64 = 10;
@@ -853,4 +852,41 @@ mod tests {
         );
         assert!(state.is_session_configured(store.as_ref()).unwrap());
     }
+}
+
+/// Verify the server-reported user/team with the configured issuer. No JWT
+/// payload or caller-supplied email is accepted as an identity assertion.
+pub async fn verified_profile_binding(
+    access_token: &str,
+    config: &TokenLifecycleConfig,
+    api_url: &str,
+) -> Result<wealthfolio_core::profiles::ConnectBinding, String> {
+    let user = crate::ConnectApiClient::new(api_url, access_token)
+        .map_err(|e| e.to_string())?
+        .get_user_info()
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(wealthfolio_core::profiles::ConnectBinding {
+        issuer: config.auth_url.clone(),
+        user_id: user.id,
+        team_id: user.team.map(|t| t.id),
+    })
+}
+
+/// Refresh a candidate before writing anything to the destination profile.
+pub async fn validate_profile_login(
+    refresh_token: &str,
+    config: &TokenLifecycleConfig,
+    api_url: &str,
+) -> Result<(String, wealthfolio_core::profiles::ConnectBinding), String> {
+    let candidate = refresh_access_token(refresh_token, config)
+        .await
+        .map_err(|e| e.message)?;
+    let binding = verified_profile_binding(&candidate.access_token, config, api_url).await?;
+    Ok((
+        candidate
+            .refresh_token
+            .unwrap_or_else(|| refresh_token.to_string()),
+        binding,
+    ))
 }

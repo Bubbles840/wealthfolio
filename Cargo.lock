@@ -7925,6 +7925,7 @@ dependencies = [
  "signal-hook-registry",
  "socket2 0.6.4",
  "tokio-macros",
+ "tracing",
  "windows-sys 0.61.2",
 ]
 
@@ -8807,6 +8808,7 @@ dependencies = [
  "async-trait",
  "axum",
  "base64 0.22.1",
+ "block2",
  "chacha20poly1305",
  "chrono",
  "diesel",
@@ -8819,6 +8821,9 @@ dependencies = [
  "keyring-core",
  "local-ip-address",
  "log",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
  "rand 0.8.6",
  "reqwest 0.13.5",
  "rmcp",
@@ -8856,7 +8861,9 @@ dependencies = [
  "wealthfolio-spending",
  "wealthfolio-storage-sqlite",
  "windows-native-keyring-store",
+ "windows-sys 0.61.2",
  "x25519-dalek",
+ "zbus 5.16.0",
  "zbus-secret-service-keyring-store",
  "zeroize",
 ]
@@ -8885,6 +8892,7 @@ name = "wealthfolio-core"
 version = "3.9.0"
 dependencies = [
  "anyhow",
+ "argon2",
  "async-trait",
  "base64 0.22.1",
  "chardetng",
@@ -8895,6 +8903,7 @@ dependencies = [
  "diesel",
  "diesel_migrations",
  "encoding_rs",
+ "fs2",
  "futures",
  "hex",
  "jsonpath-rust",
@@ -8915,6 +8924,7 @@ dependencies = [
  "serde_json",
  "serde_with",
  "sha2 0.10.9",
+ "subtle",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
@@ -8923,6 +8933,7 @@ dependencies = [
  "uuid",
  "wealthfolio-http",
  "wealthfolio-market-data",
+ "zeroize",
  "zip 2.4.2",
 ]
 
@@ -9383,6 +9394,7 @@ checksum = "063426e76fdec7438d56bb777f67e318a84a25c707b07e575cb8b78e10c028f8"
 dependencies = [
  "byteorder",
  "keyring-core",
+ "regex",
  "windows-sys 0.61.2",
  "zeroize",
 ]
@@ -10121,6 +10133,7 @@ dependencies = [
  "rustix 1.1.4",
  "serde",
  "serde_repr",
+ "tokio",
  "tracing",
  "uds_windows",
  "uuid",

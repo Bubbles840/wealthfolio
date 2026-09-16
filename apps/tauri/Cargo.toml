@@ -106,7 +106,7 @@ version = "1.0.2"
 features = ["protected"]
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows-native-keyring-store = { version = "1.1.0", default-features = false }
+windows-native-keyring-store = { version = "1.1.0", default-features = false, features = ["search"] }
 
 [target.'cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android"))))'.dependencies]
 zbus-secret-service-keyring-store = { version = "1.0.1", features = ["crypto-rust"] }
@@ -119,3 +119,22 @@ jni = "0.21"
 [target.'cfg(not(target_os = "android"))'.dev-dependencies]
 # Compatibility fixture only: verify credentials written by our previous backend.
 legacy-keyring = { package = "keyring", version = "=2.3.3" }
+
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSObject", "NSNotification", "NSDistributedNotificationCenter", "NSOperation", "NSString", "NSGeometry", "objc2-core-foundation", "block2"] }
+block2 = "0.6"
+
+[target.'cfg(target_os = "macos")'.dependencies.objc2-app-kit]
+version = "0.3"
+default-features = false
+features = ["std", "NSWorkspace"]
+
+[target.'cfg(target_os = "windows")'.dependencies.windows-sys]
+version = "0.61"
+features = ["Win32_System_RemoteDesktop"]
+
+[target.'cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android"))))'.dependencies.zbus]
+version = "5"
+default-features = false
+features = ["tokio"]
