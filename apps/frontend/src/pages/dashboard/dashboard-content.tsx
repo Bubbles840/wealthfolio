@@ -14,13 +14,8 @@ import { TimePeriod } from "@/lib/types";
 import { PortfolioUpdateTrigger } from "@/pages/dashboard/portfolio-update-trigger";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import type { TimePeriod as UITimePeriod } from "@wealthfolio/ui";
-import {
-  GainAmount,
-  GainPercent,
-  getInitialIntervalData,
-  IntervalSelector,
-  usePersistentState,
-} from "@wealthfolio/ui";
+import { GainAmount, GainPercent, getInitialIntervalData, IntervalSelector } from "@wealthfolio/ui";
+import { usePersistentState } from "@/hooks/use-persistent-state";
 import { Skeleton } from "@wealthfolio/ui/components/ui/skeleton";
 import { format } from "date-fns";
 import { useMemo, useState } from "react";

@@ -13,9 +13,9 @@ import {
   IntervalSelector,
   getInitialIntervalData,
   useNumberFormatting,
-  usePersistentState,
   type TimePeriod,
 } from "@wealthfolio/ui";
+import { usePersistentState } from "@/hooks/use-persistent-state";
 import { Icons } from "@wealthfolio/ui/components/ui/icons";
 import { Skeleton } from "@wealthfolio/ui/components/ui/skeleton";
 import {

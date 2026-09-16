@@ -356,5 +356,16 @@
     "sidebar": "사이드바",
     "floating": "플로팅 바"
   },
-  "allocation_other_in_category": "기타 {{category}}"
+  "allocation_other_in_category": "기타 {{category}}",
+  "profiles": {
+    "openingProfile": "{{name}} 여는 중…",
+    "opening": "Wealthfolio 여는 중…",
+    "locking": "Wealthfolio 잠그는 중…",
+    "switch": "프로필 전환",
+    "welcome": "환영합니다, {{name}}",
+    "continue": "계속",
+    "startupFailed": "Wealthfolio를 열 수 없습니다",
+    "reloadHelp": "새로고침하여 프로필을 다시 열어 보세요.",
+    "appearanceFailed": "화면 설정을 불러올 수 없습니다."
+  }
 }

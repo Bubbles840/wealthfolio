@@ -365,5 +365,16 @@
     "sidebar": "側邊欄",
     "floating": "浮動導覽列"
   },
-  "allocation_other_in_category": "其他{{category}}"
+  "allocation_other_in_category": "其他{{category}}",
+  "profiles": {
+    "openingProfile": "正在開啟 {{name}}…",
+    "opening": "正在開啟 Wealthfolio…",
+    "locking": "正在鎖定 Wealthfolio…",
+    "switch": "切換個人檔案",
+    "welcome": "歡迎，{{name}}",
+    "continue": "繼續",
+    "startupFailed": "無法開啟 Wealthfolio",
+    "reloadHelp": "請重新載入，再次嘗試開啟您的個人檔案。",
+    "appearanceFailed": "無法載入外觀設定。"
+  }
 }

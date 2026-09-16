@@ -305,5 +305,10 @@
   },
   "errors": {
     "unknown": "Erro desconhecido"
+  },
+  "session": {
+    "restoring": "A restaurar o Connect…",
+    "unavailable": "O Connect está temporariamente indisponível",
+    "localAvailable": "A sua carteira local está disponível. Tente ligar novamente."
   }
 }

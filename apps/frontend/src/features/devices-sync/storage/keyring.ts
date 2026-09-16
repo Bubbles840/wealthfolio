@@ -2,10 +2,10 @@
 // Uses the existing Tauri keyring integration via secrets commands
 // =================================================================
 
-import { getSecret, setSecret, logger } from "@/adapters";
+import { logger } from "@/adapters";
 
 // Storage key for sync identity in keychain
-const SYNC_IDENTITY_KEY = "sync_identity";
+import { profileCommand } from "@/features/profiles/api";
 
 /**
  * Device sync identity stored in keychain as a single JSON object
@@ -47,7 +47,7 @@ function migrateIdentity(data: Record<string, unknown>): SyncIdentity | null {
  */
 async function getIdentity(): Promise<SyncIdentity | null> {
   try {
-    const json = await getSecret(SYNC_IDENTITY_KEY);
+    const json = await profileCommand<string | null>("get_profile_sync_identity", {}, true);
     if (!json) return null;
     const data = JSON.parse(json);
     return migrateIdentity(data);
@@ -61,7 +61,11 @@ async function getIdentity(): Promise<SyncIdentity | null> {
  * Save the sync identity to keychain
  */
 async function saveIdentity(identity: SyncIdentity): Promise<void> {
-  await setSecret(SYNC_IDENTITY_KEY, JSON.stringify(identity));
+  await profileCommand(
+    "update_profile_sync_identity",
+    { identity: JSON.stringify(identity) },
+    true,
+  );
 }
 
 /**

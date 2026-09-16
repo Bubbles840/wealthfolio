@@ -1,0 +1,471 @@
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { ProfileShell } from "./profile-shell";
+import { ProfileMenu } from "./profile-menu";
+const mocks = vi.hoisted(() => ({
+  command: vi.fn(),
+  admitted: vi.fn(() => true),
+  reload: vi.fn(),
+}));
+vi.mock("@/lib/reload-application", () => ({ reloadApplication: mocks.reload }));
+vi.mock("@/adapters", () => ({ isWeb: true }));
+vi.mock("./api", () => ({ profileCommand: mocks.command }));
+vi.mock("./auth-bridge", () => ({ isNativeAuthPending: () => false }));
+vi.mock("./session", () => ({
+  installProfileSession: mocks.admitted,
+  profileScope: () => "scope",
+  revokeProfileSession: () => window.dispatchEvent(new Event("wealthfolio:profile-locked")),
+}));
+const profile = { id: "a", name: "Personal", avatarId: "clay-pebble-animated", lockEnabled: false };
+const unlocked = {
+  profiles: [profile],
+  session: { profileId: "a", scopeId: "scope" },
+  starting: false,
+};
+const mount = () =>
+  render(
+    <QueryClientProvider client={new QueryClient()}>
+      <ProfileShell>
+        <ProfileMenu collapsed />
+        <div>Private portfolio</div>
+      </ProfileShell>
+    </QueryClientProvider>,
+  );
+afterEach(() => vi.unstubAllGlobals());
+beforeEach(() => {
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    },
+  );
+  vi.clearAllMocks();
+  mocks.command.mockResolvedValue(unlocked);
+});
+it.each(["Lock Wealthfolio", "Switch profile"])(
+  "unmounts financial providers immediately on %s from the profile menu",
+  async (action) => {
+    mount();
+    expect(await screen.findByText("Private portfolio")).toBeInTheDocument();
+    fireEvent.keyDown(screen.getByRole("button", { name: "Profile menu for Personal" }), {
+      key: "Enter",
+    });
+    const item = await screen.findByRole("menuitem", { name: action });
+    mocks.command.mockResolvedValue({ ...unlocked, session: null });
+    fireEvent.click(item);
+    expect(screen.queryByText("Private portfolio")).not.toBeInTheDocument();
+    expect(mocks.command).toHaveBeenCalledWith("lock_profile", { preserveAuth: false });
+    expect(
+      await screen.findByRole("heading", {
+        name: "Who's using Wealthfolio?",
+      }),
+    ).toBeInTheDocument();
+  },
+);
+it("does not expose a protected profile while startup authorization is pending", async () => {
+  mocks.command.mockResolvedValue({
+    profiles: [{ ...profile, lockEnabled: true }],
+    session: null,
+    starting: false,
+  });
+  mount();
+  await screen.findByRole("heading", { name: "Who's using Wealthfolio?" });
+  expect(screen.queryByLabelText("Password")).not.toBeInTheDocument();
+  expect(screen.queryByText("Private portfolio")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Personal" }));
+  expect(screen.getByLabelText("Password")).toHaveAttribute("type", "password");
+  fireEvent.click(screen.getByRole("button", { name: "Show password" }));
+  expect(screen.getByLabelText("Password")).toHaveAttribute("type", "text");
+  fireEvent.click(screen.getByRole("button", { name: "Hide password" }));
+  expect(screen.getByLabelText("Password")).toHaveAttribute("type", "password");
+});
+it("keeps the new recovery code visible after password setup revokes the session", async () => {
+  mount();
+  fireEvent.keyDown(await screen.findByRole("button", { name: "Profile menu for Personal" }), {
+    key: "Enter",
+  });
+  fireEvent.click(await screen.findByRole("menuitem", { name: "Profile settings" }));
+  fireEvent.click(screen.getByRole("button", { name: "Enable password" }));
+  fireEvent.change(screen.getByLabelText("New password"), {
+    target: { value: "my passphrase 🔒" },
+  });
+  fireEvent.change(screen.getByLabelText("Re-enter password"), {
+    target: { value: "my passphrase 🔒" },
+  });
+  mocks.command.mockImplementation(async (command: string) => {
+    if (command === "set_profile_password") return "TEST-RECOVERY-CODE";
+    if (command === "get_profile_state") return { ...unlocked, session: null };
+    return null;
+  });
+  await act(async () =>
+    fireEvent.click(screen.getByRole("button", { name: /^Save(?: changes)?$/ })),
+  );
+  await waitFor(() => expect(screen.getByText("TEST-RECOVERY-CODE")).toBeInTheDocument());
+  expect(screen.getByRole("button", { name: "I've saved my recovery code" })).toBeInTheDocument();
+  expect(screen.queryByText("Private portfolio")).not.toBeInTheDocument();
+});
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+async function menuAction(name: string) {
+  fireEvent.keyDown(await screen.findByRole("button", { name: "Profile menu for Personal" }), {
+    key: "Enter",
+  });
+  fireEvent.click(await screen.findByRole("menuitem", { name }));
+}
+it("does not show the chooser while the initial profile state is unresolved", async () => {
+  const pending = deferred<typeof unlocked>();
+  mocks.command.mockReturnValue(pending.promise);
+  mount();
+  expect(screen.getByRole("status")).toHaveTextContent("Opening Wealthfolio");
+  expect(screen.getByRole("status")).toHaveClass("sr-only");
+  expect(screen.getByRole("img", { name: "Wealthfolio" })).toHaveAttribute("src", "/logo-gold.png");
+  expect(
+    screen.queryByRole("heading", { name: "Who's using Wealthfolio?" }),
+  ).not.toBeInTheDocument();
+  expect(screen.queryByText("Private portfolio")).not.toBeInTheDocument();
+  await act(async () => pending.resolve(unlocked));
+  expect(await screen.findByText("Private portfolio")).toBeInTheDocument();
+});
+it("waits for teardown before allowing profile selection", async () => {
+  const closing = deferred<void>();
+  mount();
+  await screen.findByText("Private portfolio");
+  mocks.command.mockImplementation((command) =>
+    command === "lock_profile" ? closing.promise : Promise.resolve({ ...unlocked, session: null }),
+  );
+  await menuAction("Switch profile");
+  expect(screen.getByRole("status")).toHaveTextContent("Locking Wealthfolio");
+  expect(screen.queryByRole("button", { name: "Personal" })).not.toBeInTheDocument();
+  await act(async () => closing.resolve());
+  fireEvent.click(await screen.findByRole("button", { name: "Personal" }));
+  await waitFor(() => expect(mocks.reload).toHaveBeenCalledWith({ dashboard: true }));
+});
+it("keeps failed teardown covered and lets the user retry", async () => {
+  mount();
+  await screen.findByText("Private portfolio");
+  mocks.command.mockImplementation((command) =>
+    command === "lock_profile"
+      ? Promise.reject(new Error("Teardown failed"))
+      : Promise.resolve(unlocked),
+  );
+  await menuAction("Switch profile");
+  expect(await screen.findByRole("alert")).toHaveTextContent("Teardown failed");
+  expect(screen.queryByText("Private portfolio")).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Personal" })).not.toBeInTheDocument();
+  mocks.command.mockResolvedValue({ ...unlocked, session: null });
+  fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+  expect(
+    await screen.findByRole("heading", { name: "Who's using Wealthfolio?" }),
+  ).toBeInTheDocument();
+});
+it("opens the selected unprotected profile from the shared lock screen and preserves its route", async () => {
+  mount();
+  await screen.findByText("Private portfolio");
+  mocks.command.mockResolvedValue({ ...unlocked, session: null });
+  await menuAction("Lock Wealthfolio");
+  expect(
+    await screen.findByRole("heading", { name: "Who's using Wealthfolio?" }),
+  ).toBeInTheDocument();
+  expect(mocks.reload).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "Personal" }));
+  await waitFor(() => expect(mocks.reload).toHaveBeenCalledWith({ dashboard: false }));
+});
+it("ignores a status read from before a switch started", async () => {
+  const old = deferred<typeof unlocked>();
+  mount();
+  await screen.findByText("Private portfolio");
+  // Hold a real polling read, then invalidate it with an explicit switch.
+  mocks.command.mockImplementation((command) =>
+    command === "get_profile_state" ? old.promise : Promise.resolve(null),
+  );
+  mocks.command.mockClear();
+  await waitFor(() => expect(mocks.command).toHaveBeenCalledWith("get_profile_state"), {
+    timeout: 3000,
+  });
+  await menuAction("Switch profile");
+  await screen.findByRole("heading", { name: "Who's using Wealthfolio?" });
+  await act(async () => old.resolve(unlocked));
+  expect(screen.queryByText("Private portfolio")).not.toBeInTheDocument();
+});
+
+it("keeps all profiles visible during password entry and clears credentials when switching", async () => {
+  const second = { id: "b", name: "Family", avatarId: "clay-fluff-animated", lockEnabled: true };
+  mocks.command.mockResolvedValue({
+    profiles: [{ ...profile, lockEnabled: true }, second],
+    session: null,
+    starting: false,
+  });
+  mount();
+  fireEvent.click(await screen.findByRole("button", { name: "Personal" }));
+  fireEvent.change(screen.getByLabelText("Password"), { target: { value: "123456" } });
+  expect(screen.getByRole("button", { name: "Personal" })).toHaveAttribute("aria-pressed", "true");
+  fireEvent.click(screen.getByRole("button", { name: "Family" }));
+  expect(screen.getByLabelText("Password")).toHaveValue("");
+  expect(screen.getByRole("button", { name: "Personal" })).toBeInTheDocument();
+  expect(screen.queryByText("password required")).not.toBeInTheDocument();
+  expect(screen.queryByText("Open profile")).not.toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText("Password"), { target: { value: "654321" } });
+  fireEvent.click(screen.getByRole("button", { name: "Unlock" }));
+  await waitFor(() =>
+    expect(mocks.command).toHaveBeenCalledWith("unlock_profile", {
+      profileId: "b",
+      proof: "654321",
+    }),
+  );
+});
+
+it("does not send another profile's password when selecting an unprotected profile", async () => {
+  mocks.command.mockResolvedValue({
+    profiles: [
+      { ...profile, lockEnabled: true },
+      {
+        id: "b",
+        name: "Family",
+        avatarId: "clay-fluff-animated",
+        lockEnabled: false,
+      },
+    ],
+    session: null,
+    starting: false,
+  });
+  mount();
+  fireEvent.click(await screen.findByRole("button", { name: "Personal" }));
+  fireEvent.change(screen.getByLabelText("Password"), { target: { value: "123456" } });
+  fireEvent.click(screen.getByRole("button", { name: "Family" }));
+  await waitFor(() =>
+    expect(mocks.command).toHaveBeenCalledWith("unlock_profile", {
+      profileId: "b",
+      proof: null,
+    }),
+  );
+});
+
+it("keeps password entry hidden after locking until the selected profile is clicked", async () => {
+  const protectedState = { ...unlocked, profiles: [{ ...profile, lockEnabled: true }] };
+  mocks.command.mockResolvedValue(protectedState);
+  mount();
+  await screen.findByText("Private portfolio");
+  mocks.command.mockResolvedValue({ ...protectedState, session: null });
+  await menuAction("Lock Wealthfolio");
+  const selected = await screen.findByRole("button", { name: "Personal" });
+  expect(selected).toHaveAttribute("aria-pressed", "true");
+  expect(screen.queryByLabelText("Password")).not.toBeInTheDocument();
+  fireEvent.click(selected);
+  expect(screen.getByLabelText("Password")).toHaveAttribute("type", "password");
+});
+
+it("keeps password verification on the lock screen and allows retry after an incorrect password", async () => {
+  const locked = { ...unlocked, profiles: [{ ...profile, lockEnabled: true }], session: null };
+  mocks.command.mockResolvedValue(locked);
+  mount();
+  fireEvent.click(await screen.findByRole("button", { name: "Personal" }));
+  const input = screen.getByLabelText("Password");
+  fireEvent.change(input, { target: { value: "111111" } });
+  const pending = deferred<void>();
+  mocks.command.mockImplementation((command) =>
+    command === "unlock_profile" ? pending.promise : Promise.resolve(locked),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Unlock" }));
+  expect(input).toBeInTheDocument();
+  expect(input).toBeDisabled();
+  expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  await act(async () =>
+    pending.reject(
+      new Error("PROFILE_PASSWORD_INVALID: The password or recovery code is incorrect."),
+    ),
+  );
+  expect(screen.getByLabelText("Password")).toBe(input);
+  expect(input).toHaveAttribute("aria-invalid", "true");
+  expect(input).toHaveFocus();
+  expect(screen.getByRole("alert")).toHaveClass("sr-only");
+  expect(screen.queryByText(/PROFILE_PASSWORD_INVALID/)).not.toBeInTheDocument();
+  expect(mocks.reload).not.toHaveBeenCalled();
+  fireEvent.change(input, { target: { value: "123456" } });
+  expect(input).toHaveAttribute("aria-invalid", "false");
+  mocks.command.mockResolvedValue(unlocked.session);
+  fireEvent.click(screen.getByRole("button", { name: "Unlock" }));
+  await waitFor(() => expect(mocks.reload).toHaveBeenCalled());
+  expect(screen.getByRole("status")).toHaveTextContent("Opening Personal");
+});
+
+it("only edits the password when its management action is expanded", async () => {
+  mount();
+  await menuAction("Profile settings");
+  expect(screen.queryByLabelText("New password")).not.toBeInTheDocument();
+  const toggle = screen.getByRole("button", { name: "Enable password" });
+  fireEvent.click(toggle);
+  fireEvent.change(screen.getByLabelText("New password"), {
+    target: { value: "my passphrase 🔒" },
+  });
+  fireEvent.change(screen.getByLabelText("Re-enter password"), {
+    target: { value: "my passphrase 🔒" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Disable password" }));
+  expect(screen.queryByLabelText("New password")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: /^Save(?: changes)?$/ }));
+  await waitFor(() => expect(mocks.reload).toHaveBeenCalled());
+  expect(mocks.command.mock.calls.some(([command]) => command === "set_profile_password")).toBe(
+    false,
+  );
+});
+
+it("requires proof and removes an existing password only when disabling is saved", async () => {
+  const protectedState = { ...unlocked, profiles: [{ ...profile, lockEnabled: true }] };
+  mocks.command.mockResolvedValue(protectedState);
+  mount();
+  await menuAction("Profile settings");
+  fireEvent.click(screen.getByRole("button", { name: "Disable password" }));
+  expect(screen.queryByLabelText("New password")).not.toBeInTheDocument();
+  expect(screen.getByLabelText("Current password or recovery code")).toBeRequired();
+  expect(mocks.command.mock.calls.some(([command]) => command === "set_profile_password")).toBe(
+    false,
+  );
+  fireEvent.change(screen.getByLabelText("Current password or recovery code"), {
+    target: { value: "123456" },
+  });
+  mocks.command.mockImplementation((command) =>
+    Promise.resolve(command === "get_profile_state" ? protectedState : null),
+  );
+  fireEvent.click(screen.getByRole("button", { name: /^Save(?: changes)?$/ }));
+  await waitFor(() =>
+    expect(mocks.command).toHaveBeenCalledWith(
+      "set_profile_password",
+      { proof: "123456", password: null },
+      true,
+    ),
+  );
+});
+
+it.each(["setup", "change", "recovery"])(
+  "requires matching passwords before any %s mutation",
+  async (flow) => {
+    const protectedState = {
+      ...unlocked,
+      profiles: [{ ...profile, lockEnabled: flow !== "setup" }],
+      session: flow === "recovery" ? null : unlocked.session,
+    };
+    mocks.command.mockResolvedValue(protectedState);
+    mount();
+    if (flow === "recovery") {
+      fireEvent.click(await screen.findByRole("button", { name: "Personal" }));
+      fireEvent.click(screen.getByRole("button", { name: "Forgot password?" }));
+      fireEvent.change(screen.getByLabelText("Recovery code"), {
+        target: { value: "RECOVERY-CODE" },
+      });
+    } else {
+      await menuAction("Profile settings");
+      if (flow === "setup")
+        fireEvent.click(screen.getByRole("button", { name: "Enable password" }));
+      else
+        fireEvent.change(screen.getByLabelText("Current password or recovery code"), {
+          target: { value: "123456" },
+        });
+    }
+    const password = "  My passphrase é🔒  ";
+    fireEvent.change(screen.getByLabelText("New password"), { target: { value: password } });
+    fireEvent.change(screen.getByLabelText("Re-enter password"), {
+      target: { value: "different password" },
+    });
+    mocks.command.mockClear();
+    fireEvent.click(screen.getByRole("button", { name: /^Save(?: changes)?$/ }));
+    expect(await screen.findByText("Passwords do not match.")).toBeInTheDocument();
+    expect(screen.getByLabelText("Re-enter password")).toHaveFocus();
+    expect(mocks.command).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByLabelText("Re-enter password"), { target: { value: password } });
+    expect(screen.queryByText("Passwords do not match.")).not.toBeInTheDocument();
+    mocks.command.mockImplementation((command) => {
+      if (command === "set_profile_password" || command === "recover_profile_password")
+        return Promise.resolve("NEW-RECOVERY-CODE");
+      if (command === "get_profile_state")
+        return Promise.resolve({ ...protectedState, session: null });
+      return Promise.resolve(null);
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^Save(?: changes)?$/ }));
+    await screen.findByText("NEW-RECOVERY-CODE");
+    if (flow === "recovery") {
+      expect(mocks.command).toHaveBeenCalledWith("recover_profile_password", {
+        profileId: "a",
+        recoveryCode: "RECOVERY-CODE",
+        password,
+      });
+    } else {
+      expect(mocks.command).toHaveBeenCalledWith(
+        "set_profile_password",
+        {
+          proof: flow === "setup" ? null : "123456",
+          password,
+        },
+        true,
+      );
+    }
+  },
+);
+
+it("removes a password with current proof without requiring confirmation", async () => {
+  mocks.command.mockResolvedValue({ ...unlocked, profiles: [{ ...profile, lockEnabled: true }] });
+  mount();
+  await menuAction("Profile settings");
+  fireEvent.change(screen.getByLabelText("New password"), {
+    target: { value: "discard this password" },
+  });
+  fireEvent.change(screen.getByLabelText("Re-enter password"), {
+    target: { value: "different password" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Disable password" }));
+  expect(screen.queryByLabelText("Re-enter password")).not.toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText("Current password or recovery code"), {
+    target: { value: "old password" },
+  });
+  mocks.command.mockResolvedValue(null);
+  fireEvent.click(screen.getByRole("button", { name: /^Save(?: changes)?$/ }));
+  await waitFor(() =>
+    expect(mocks.command).toHaveBeenCalledWith(
+      "set_profile_password",
+      {
+        proof: "old password",
+        password: null,
+      },
+      true,
+    ),
+  );
+});
+
+it("deletes the last profile and returns to an empty profile picker", async () => {
+  localStorage.setItem("profile:a:chart", "private preference");
+  localStorage.setItem("profile:b:chart", "keep");
+  mount();
+  fireEvent.keyDown(await screen.findByRole("button", { name: "Profile menu for Personal" }), {
+    key: "Enter",
+  });
+  fireEvent.click(await screen.findByRole("menuitem", { name: "Profile settings" }));
+  fireEvent.click(screen.getByRole("button", { name: "Delete profile" }));
+  fireEvent.change(screen.getByLabelText("Type Personal to confirm"), {
+    target: { value: "Personal" },
+  });
+  mocks.command.mockImplementation(async (command: string) => {
+    if (command === "get_profile_state") return { profiles: [], session: null, starting: false };
+    return null;
+  });
+  const buttons = screen.getAllByRole("button", { name: "Delete profile" });
+  fireEvent.click(buttons[buttons.length - 1]);
+  expect(await screen.findByRole("button", { name: "Create profile" })).toBeInTheDocument();
+  expect(localStorage.getItem("profile:a:chart")).toBeNull();
+  expect(localStorage.getItem("profile:b:chart")).toBe("keep");
+  expect(mocks.command).toHaveBeenCalledWith(
+    "delete_profile",
+    { profileId: "a", confirmation: "Personal", proof: "" },
+    true,
+  );
+  expect(screen.queryByText("Private portfolio")).not.toBeInTheDocument();
+});

@@ -365,5 +365,16 @@
     "sidebar": "Sidebar",
     "floating": "Floating Bar"
   },
-  "allocation_other_in_category": "Other {{category}}"
+  "allocation_other_in_category": "Other {{category}}",
+  "profiles": {
+    "openingProfile": "Opening {{name}}…",
+    "opening": "Opening Wealthfolio…",
+    "locking": "Locking Wealthfolio…",
+    "switch": "Switch profile",
+    "welcome": "Welcome, {{name}}",
+    "continue": "Continue",
+    "startupFailed": "Couldn’t open Wealthfolio",
+    "reloadHelp": "Reload to try opening your profile again.",
+    "appearanceFailed": "Couldn’t load appearance settings."
+  }
 }

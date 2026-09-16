@@ -1,3 +1,4 @@
+import { profileFetch } from "@/features/profiles/session";
 // Web adapter core - Internal invoke function, COMMANDS map, and helpers
 // This module exports invoke, logger, and platform constants for shared modules
 
@@ -2142,7 +2143,7 @@ export const invoke = async <T>(command: string, payload?: Record<string, unknow
     }
   }
 
-  const res = await fetch(url, {
+  const res = await profileFetch(url, {
     method,
     headers,
     body,

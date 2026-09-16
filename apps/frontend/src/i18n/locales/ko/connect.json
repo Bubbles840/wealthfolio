@@ -286,5 +286,10 @@
   },
   "errors": {
     "unknown": "알 수 없는 오류"
+  },
+  "session": {
+    "restoring": "Connect 복원 중…",
+    "unavailable": "Connect를 일시적으로 사용할 수 없습니다",
+    "localAvailable": "로컬 포트폴리오는 사용할 수 있습니다. 다시 연결해 보세요."
   }
 }

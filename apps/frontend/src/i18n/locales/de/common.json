@@ -365,5 +365,16 @@
     "sidebar": "Seitenleiste",
     "floating": "Schwebeleiste"
   },
-  "allocation_other_in_category": "Sonstige ({{category}})"
+  "allocation_other_in_category": "Sonstige ({{category}})",
+  "profiles": {
+    "openingProfile": "{{name}} wird geöffnet…",
+    "opening": "Wealthfolio wird geöffnet…",
+    "locking": "Wealthfolio wird gesperrt…",
+    "switch": "Profil wechseln",
+    "welcome": "Willkommen, {{name}}",
+    "continue": "Weiter",
+    "startupFailed": "Wealthfolio konnte nicht geöffnet werden",
+    "reloadHelp": "Laden Sie die Seite neu, um Ihr Profil erneut zu öffnen.",
+    "appearanceFailed": "Die Darstellungseinstellungen konnten nicht geladen werden."
+  }
 }

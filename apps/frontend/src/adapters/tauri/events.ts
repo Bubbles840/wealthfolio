@@ -1,3 +1,5 @@
+import { matchesProfileScope } from "@/features/profiles/session";
+
 // Event Listeners
 import type {
   EventCallback as TauriEventCallback,
@@ -10,7 +12,15 @@ import type { EventCallback, UnlistenFn } from "../types";
 
 // Helper to adapt Tauri's event callback to our unified type
 const adaptCallback = <T>(handler: EventCallback<T>): TauriEventCallback<T> => {
-  return (event) => handler({ event: event.event, payload: event.payload, id: event.id });
+  return (event) => {
+    if (/^(portfolio:|market:|asset:|broker:)/.test(event.event)) {
+      const payload = event.payload as { scopeId?: string; data?: T };
+      if (!payload?.scopeId || !matchesProfileScope(payload.scopeId)) return;
+      handler({ event: event.event, payload: payload.data as T, id: event.id });
+      return;
+    }
+    handler({ event: event.event, payload: event.payload, id: event.id });
+  };
 };
 
 // Helper to adapt Tauri's unlisten function to our unified type.

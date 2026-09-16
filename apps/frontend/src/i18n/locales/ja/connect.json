@@ -286,5 +286,10 @@
   },
   "errors": {
     "unknown": "不明なエラー"
+  },
+  "session": {
+    "restoring": "Connect を復元しています…",
+    "unavailable": "Connect は一時的に利用できません",
+    "localAvailable": "ローカルのポートフォリオは利用できます。再接続してください。"
   }
 }

@@ -16,12 +16,33 @@ body {
 
 /* Simulate a Splash screen before react app mount */
 body {
-  background-color: #09090b;
-  background-image: url("/logo-gold.png");
-  background-repeat: no-repeat;
-  background-position: center center;
-  background-size: 100px auto;
-  background-attachment: fixed;
+  margin: 0;
+  background-color: #100f0f;
+}
+
+#root:empty::before {
+  content: "";
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  width: 80px;
+  height: 80px;
+  background: url("/logo-gold.png") center / contain no-repeat;
+  transform: translate(-50%, -50%);
+  animation: splash-logo-spin 3s linear infinite;
+  pointer-events: none;
+}
+
+@keyframes splash-logo-spin {
+  to {
+    transform: translate(-50%, -50%) rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #root:empty::before {
+    animation: none;
+  }
 }
 
 /*

@@ -356,5 +356,16 @@
     "sidebar": "侧边栏",
     "floating": "浮动栏"
   },
-  "allocation_other_in_category": "其他{{category}}"
+  "allocation_other_in_category": "其他{{category}}",
+  "profiles": {
+    "openingProfile": "正在打开 {{name}}…",
+    "opening": "正在打开 Wealthfolio…",
+    "locking": "正在锁定 Wealthfolio…",
+    "switch": "切换个人资料",
+    "welcome": "欢迎，{{name}}",
+    "continue": "继续",
+    "startupFailed": "无法打开 Wealthfolio",
+    "reloadHelp": "请重新加载以再次尝试打开个人资料。",
+    "appearanceFailed": "无法加载外观设置。"
+  }
 }

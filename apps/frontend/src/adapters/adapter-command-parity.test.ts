@@ -1,7 +1,7 @@
 import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 
 import { calculateRebalancePlan as calculateTauriRebalancePlan } from "./tauri";
 import { COMMANDS, invoke } from "./web/core";
@@ -21,6 +21,12 @@ const TAURI_REGISTERED_COMMAND_RE = /commands::[a-z_]+::([a-zA-Z0-9_]+)/g;
 const RUNTIME_EXPORT_RE =
   /^export\s+(?:const|async\s+function|function|class|enum)\s+([a-zA-Z_$][\w$]*)/gm;
 const NAMED_REEXPORT_RE = /export\s*\{([^{}]*)\}\s*from\s*["']([^"']+)["']/g;
+
+// Adapter tests exercise transport behavior inside an admitted profile.
+beforeEach(async () => {
+  const { installProfileSession } = await import("@/features/profiles/session");
+  installProfileSession({ profileId: "test-profile", scopeId: "test-scope" });
+});
 
 afterEach(() => {
   vi.unstubAllGlobals();

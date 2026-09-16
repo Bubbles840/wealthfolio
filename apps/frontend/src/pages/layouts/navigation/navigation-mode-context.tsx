@@ -1,3 +1,4 @@
+import { profilePreferenceKey } from "@/hooks/use-persistent-state";
 import { createContext, ReactNode, useCallback, useContext, useEffect, useMemo } from "react";
 import { usePersistentState } from "@/hooks/use-persistent-state";
 
@@ -44,7 +45,7 @@ function readInitialMode(): NavigationMode {
     return DEFAULT_MODE;
   }
 
-  const stored = parseStoredMode(window.localStorage.getItem(STORAGE_KEY));
+  const stored = parseStoredMode(window.localStorage.getItem(profilePreferenceKey(STORAGE_KEY)));
   return stored ?? DEFAULT_MODE;
 }
 

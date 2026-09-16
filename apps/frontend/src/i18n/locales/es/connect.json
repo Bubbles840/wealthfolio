@@ -305,5 +305,10 @@
   },
   "errors": {
     "unknown": "Error desconocido"
+  },
+  "session": {
+    "restoring": "Restaurando Connect…",
+    "unavailable": "Connect no está disponible temporalmente",
+    "localAvailable": "Tu cartera local está disponible. Reintenta la conexión."
   }
 }

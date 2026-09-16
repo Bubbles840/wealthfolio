@@ -288,5 +288,10 @@
   },
   "errors": {
     "unknown": "Unbekannter Fehler"
+  },
+  "session": {
+    "restoring": "Connect wird wiederhergestellt…",
+    "unavailable": "Connect ist vorübergehend nicht verfügbar",
+    "localAvailable": "Ihr lokales Portfolio ist verfügbar. Versuchen Sie erneut, eine Verbindung herzustellen."
   }
 }

@@ -1,3 +1,5 @@
+import { StartupScreen } from "@/components/startup-screen";
+import { useProfile } from "@/features/profiles/profile-context";
 import { BackupError, type BackupFailure } from "@/pages/settings/exports/backup-error";
 import { reloadApplication } from "@/lib/reload-application";
 import { useEffect, useRef, useState, type ReactNode } from "react";
@@ -24,6 +26,7 @@ export function NativeDatabaseGate({ children }: { children: ReactNode }) {
 
 function NativeStartup({ children }: { children: ReactNode }) {
   const { t, i18n } = useTranslation();
+  const profile = useProfile();
   const status = useQuery({
     queryKey: ["database-startup"],
     queryFn: getDatabaseStartupStatus,
@@ -142,16 +145,8 @@ function NativeStartup({ children }: { children: ReactNode }) {
   )
     return children;
   const startupError = status.data?.error || (status.error ? String(status.error) : null);
-  if (!startupError || status.data?.maintenance)
-    return (
-      <main
-        className="text-paper flex min-h-screen flex-col items-center justify-center gap-6 bg-[#09090b] p-6 text-center"
-        role="status"
-      >
-        <img src="/logo-gold.png" alt="Wealthfolio" width={100} height={100} />
-        <p>{t("settings:recovery_opening")}</p>
-      </main>
-    );
+  if (!startupError || status.data?.maintenance || /PROFILE_(LOCKED|STALE)/.test(startupError))
+    return <StartupScreen />;
 
   const createdAt = preview?.summary.createdAt ? new Date(preview.summary.createdAt) : null;
   const formattedDate =
@@ -265,6 +260,17 @@ function NativeStartup({ children }: { children: ReactNode }) {
               </form>
             )}
           </>
+        )}
+        {profile && (
+          <Button
+            variant="ghost"
+            disabled={busy === "restore" || busy === "retry" || !!status.data?.maintenance}
+            onClick={() => {
+              void cancel().then(profile.switchProfile);
+            }}
+          >
+            {t("common:profiles.switch", { defaultValue: "Switch profile" })}
+          </Button>
         )}
         {error && (
           <div role="alert" className="text-destructive break-words text-sm">

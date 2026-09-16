@@ -1,4 +1,5 @@
 import { LiquidGlass } from "@/components/liquid-glass";
+import { ProfileMenu } from "@/features/profiles/profile-menu";
 import { SyncStatusIcon } from "@/features/wealthfolio-connect/components/sync-status-icon";
 import { useAggregatedSyncStatus } from "@/features/wealthfolio-connect/hooks";
 import { useHapticFeedback } from "@/hooks/use-haptic-feedback";
@@ -191,6 +192,9 @@ export function MobileNavBar({ navigation }: MobileNavBarProps) {
           </div>
 
           <div className="scrollbar-hide max-h-[calc(min(82vh,720px)-7rem)] overflow-y-auto px-8">
+            <div className="border-border/70 border-b pb-3">
+              <ProfileMenu />
+            </div>
             <div className="divide-border/70 divide-y">
               {standardMenuItems.map((item) => {
                 const isActive = isPathActive(location.pathname, item.href);

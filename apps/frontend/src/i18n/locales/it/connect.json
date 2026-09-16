@@ -305,5 +305,10 @@
   },
   "errors": {
     "unknown": "Errore sconosciuto"
+  },
+  "session": {
+    "restoring": "Ripristino di Connect…",
+    "unavailable": "Connect è temporaneamente non disponibile",
+    "localAvailable": "Il portafoglio locale è disponibile. Riprova a connetterti."
   }
 }

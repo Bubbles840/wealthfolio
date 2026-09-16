@@ -356,5 +356,16 @@
     "sidebar": "サイドバー",
     "floating": "フローティングバー"
   },
-  "allocation_other_in_category": "その他の{{category}}"
+  "allocation_other_in_category": "その他の{{category}}",
+  "profiles": {
+    "openingProfile": "{{name}} を開いています…",
+    "opening": "Wealthfolio を開いています…",
+    "locking": "Wealthfolio をロックしています…",
+    "switch": "プロフィールを切り替え",
+    "welcome": "ようこそ、{{name}}",
+    "continue": "続ける",
+    "startupFailed": "Wealthfolio を開けませんでした",
+    "reloadHelp": "再読み込みしてプロフィールをもう一度開いてください。",
+    "appearanceFailed": "外観設定を読み込めませんでした。"
+  }
 }

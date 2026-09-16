@@ -288,5 +288,10 @@
   },
   "errors": {
     "unknown": "Unknown error"
+  },
+  "session": {
+    "restoring": "Restoring Connect…",
+    "unavailable": "Connect is temporarily unavailable",
+    "localAvailable": "Your local portfolio is available. Retry to reconnect."
   }
 }

@@ -1,3 +1,4 @@
+import { profileScope, matchesProfileScope } from "@/features/profiles/session";
 // Web adapter - SSE Bridge and Event Listeners
 
 import { logger, EVENTS_ENDPOINT } from "./core";
@@ -12,8 +13,14 @@ class ServerEventBridge {
   private readonly listeners = new Map<string, Set<EventCallback<unknown>>>();
   private readonly eventHandlers = new Map<string, EventListener>();
   private nextEventId = 0;
+  private scope = "";
 
-  constructor(private readonly url: string) {}
+  constructor(private readonly url: string) {
+    window.addEventListener("wealthfolio:profile-locked", () => {
+      this.teardown();
+      this.listeners.clear();
+    });
+  }
 
   listen<T>(eventName: string, handler: EventCallback<T>): Promise<UnlistenFn> {
     if (typeof window === "undefined" || typeof EventSource === "undefined") {
@@ -32,7 +39,11 @@ class ServerEventBridge {
     if (this.eventSource) {
       return;
     }
-    this.eventSource = new EventSource(this.url, { withCredentials: true });
+    this.scope = profileScope();
+    this.eventSource = new EventSource(
+      `${this.url}?profileScope=${encodeURIComponent(profileScope())}`,
+      { withCredentials: true },
+    );
     this.eventSource.onerror = (error) => {
       logger.warn("Portfolio event stream error", error);
     };
@@ -97,6 +108,7 @@ class ServerEventBridge {
   }
 
   private emit(eventName: string, payload: unknown) {
+    if (!matchesProfileScope(this.scope)) return;
     const listeners = this.listeners.get(eventName);
     if (!listeners || listeners.size === 0) {
       return;

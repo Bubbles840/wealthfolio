@@ -305,5 +305,10 @@
   },
   "errors": {
     "unknown": "Erreur inconnue"
+  },
+  "session": {
+    "restoring": "Restauration de Connect…",
+    "unavailable": "Connect est temporairement indisponible",
+    "localAvailable": "Votre portefeuille local reste accessible. Réessayez pour vous reconnecter."
   }
 }

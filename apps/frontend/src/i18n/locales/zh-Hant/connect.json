@@ -288,5 +288,10 @@
   },
   "errors": {
     "unknown": "未知錯誤"
+  },
+  "session": {
+    "restoring": "正在還原 Connect…",
+    "unavailable": "Connect 暫時無法使用",
+    "localAvailable": "您的本機投資組合仍可使用。請重試連線。"
   }
 }
