@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Path, Query},
     routing::{delete, get, patch, post},
     Json, Router,
 };
@@ -132,7 +132,7 @@ pub struct FlowIdBody {
 // ─────────────────────────────────────────────────────────────────────────────
 
 async fn get_device_endpoint(
-    State(state): State<Arc<AppState>>,
+    axum::Extension(state): axum::Extension<Arc<AppState>>,
     Path(device_id): Path<String>,
 ) -> ApiResult<Json<Device>> {
     let token = get_access_token(&state).await?;
@@ -145,7 +145,9 @@ async fn get_device_endpoint(
     Ok(Json(device))
 }
 
-async fn get_current_device(State(state): State<Arc<AppState>>) -> ApiResult<Json<Device>> {
+async fn get_current_device(
+    axum::Extension(state): axum::Extension<Arc<AppState>>,
+) -> ApiResult<Json<Device>> {
     let token = get_access_token(&state).await?;
     let device_id = get_device_id(&state)
         .ok_or_else(|| ApiError::BadRequest("No device ID configured".to_string()))?;
@@ -159,7 +161,7 @@ async fn get_current_device(State(state): State<Arc<AppState>>) -> ApiResult<Jso
 }
 
 async fn list_devices(
-    State(state): State<Arc<AppState>>,
+    axum::Extension(state): axum::Extension<Arc<AppState>>,
     Query(query): Query<ListDevicesQuery>,
 ) -> ApiResult<Json<Vec<Device>>> {
     info!("[DeviceSync] Listing devices (scope: {:?})...", query.scope);
@@ -176,7 +178,7 @@ async fn list_devices(
 }
 
 async fn update_device_endpoint(
-    State(state): State<Arc<AppState>>,
+    axum::Extension(state): axum::Extension<Arc<AppState>>,
     Path(device_id): Path<String>,
     Json(body): Json<UpdateDeviceBody>,
 ) -> ApiResult<Json<SuccessResponse>> {
@@ -203,7 +205,7 @@ async fn update_device_endpoint(
 }
 
 async fn delete_device_endpoint(
-    State(state): State<Arc<AppState>>,
+    axum::Extension(state): axum::Extension<Arc<AppState>>,
     Path(device_id): Path<String>,
 ) -> ApiResult<Json<SuccessResponse>> {
     info!("Deleting device: {}", device_id);
@@ -219,7 +221,7 @@ async fn delete_device_endpoint(
 }
 
 async fn revoke_device_endpoint(
-    State(state): State<Arc<AppState>>,
+    axum::Extension(state): axum::Extension<Arc<AppState>>,
     Path(device_id): Path<String>,
 ) -> ApiResult<Json<SuccessResponse>> {
     info!("Revoking device: {}", device_id);
@@ -239,7 +241,7 @@ async fn revoke_device_endpoint(
 // ─────────────────────────────────────────────────────────────────────────────
 
 async fn reset_team_sync(
-    State(state): State<Arc<AppState>>,
+    axum::Extension(state): axum::Extension<Arc<AppState>>,
     Json(body): Json<ResetTeamSyncBody>,
 ) -> ApiResult<Json<ResetTeamSyncResponse>> {
     info!("[DeviceSync] Resetting team sync...");
@@ -259,7 +261,7 @@ async fn reset_team_sync(
 // ─────────────────────────────────────────────────────────────────────────────
 
 async fn create_pairing(
-    State(state): State<Arc<AppState>>,
+    axum::Extension(state): axum::Extension<Arc<AppState>>,
     Json(body): Json<CreatePairingBody>,
 ) -> ApiResult<Json<CreatePairingResponse>> {
     debug!("Creating pairing session...");
@@ -284,7 +286,7 @@ async fn create_pairing(
 }
 
 async fn get_pairing(
-    State(state): State<Arc<AppState>>,
+    axum::Extension(state): axum::Extension<Arc<AppState>>,
     Path(pairing_id): Path<String>,
 ) -> ApiResult<Json<GetPairingResponse>> {
     debug!("Getting pairing session: {}", pairing_id);
@@ -302,7 +304,7 @@ async fn get_pairing(
 }
 
 async fn approve_pairing(
-    State(state): State<Arc<AppState>>,
+    axum::Extension(state): axum::Extension<Arc<AppState>>,
     Path(pairing_id): Path<String>,
 ) -> ApiResult<Json<SuccessResponse>> {
     debug!("Approving pairing session: {}", pairing_id);
@@ -320,7 +322,7 @@ async fn approve_pairing(
 }
 
 async fn complete_pairing(
-    State(state): State<Arc<AppState>>,
+    axum::Extension(state): axum::Extension<Arc<AppState>>,
     Path(pairing_id): Path<String>,
     Json(body): Json<CompletePairingBody>,
 ) -> ApiResult<Json<CompletePairingResponse>> {
@@ -359,7 +361,7 @@ async fn complete_pairing(
 }
 
 async fn cancel_pairing(
-    State(state): State<Arc<AppState>>,
+    axum::Extension(state): axum::Extension<Arc<AppState>>,
     Path(pairing_id): Path<String>,
 ) -> ApiResult<Json<SuccessResponse>> {
     debug!("Canceling pairing session: {}", pairing_id);
@@ -381,7 +383,7 @@ async fn cancel_pairing(
 // ─────────────────────────────────────────────────────────────────────────────
 
 async fn claim_pairing(
-    State(state): State<Arc<AppState>>,
+    axum::Extension(state): axum::Extension<Arc<AppState>>,
     Json(body): Json<ClaimPairingBody>,
 ) -> ApiResult<Json<ClaimPairingResponse>> {
     debug!("Claiming pairing session with code...");
@@ -406,7 +408,7 @@ async fn claim_pairing(
 }
 
 async fn get_pairing_messages(
-    State(state): State<Arc<AppState>>,
+    axum::Extension(state): axum::Extension<Arc<AppState>>,
     Path(pairing_id): Path<String>,
 ) -> ApiResult<Json<PairingMessagesResponse>> {
     debug!("Getting pairing messages: {}", pairing_id);
@@ -424,7 +426,7 @@ async fn get_pairing_messages(
 }
 
 async fn confirm_pairing_endpoint(
-    State(state): State<Arc<AppState>>,
+    axum::Extension(state): axum::Extension<Arc<AppState>>,
     Path(pairing_id): Path<String>,
     Json(body): Json<ConfirmPairingBody>,
 ) -> ApiResult<Json<ConfirmPairingResponse>> {
@@ -459,6 +461,7 @@ async fn confirm_pairing_endpoint(
                 match wealthfolio_device_sync::normalize_sync_datetime(min_created_at) {
                     Ok(normalized) => {
                         if let Err(err) = device_sync_engine::set_min_snapshot_created_at_in_store(
+                            &state,
                             &device_id,
                             &normalized,
                         ) {
@@ -503,7 +506,7 @@ async fn confirm_pairing_endpoint(
 // ─────────────────────────────────────────────────────────────────────────────
 
 async fn complete_pairing_with_transfer(
-    State(state): State<Arc<AppState>>,
+    axum::Extension(state): axum::Extension<Arc<AppState>>,
     Json(body): Json<CompletePairingWithTransferBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
     device_sync_engine::complete_pairing_with_transfer(
@@ -519,7 +522,7 @@ async fn complete_pairing_with_transfer(
 }
 
 async fn confirm_pairing_with_bootstrap(
-    State(state): State<Arc<AppState>>,
+    axum::Extension(state): axum::Extension<Arc<AppState>>,
     Json(body): Json<ConfirmPairingWithBootstrapBody>,
 ) -> ApiResult<Json<device_sync_engine::ConfirmPairingWithBootstrapResult>> {
     let result = device_sync_engine::confirm_pairing_with_bootstrap(
@@ -539,7 +542,7 @@ async fn confirm_pairing_with_bootstrap(
 // ─────────────────────────────────────────────────────────────────────────────
 
 async fn begin_pairing_confirm(
-    State(state): State<Arc<AppState>>,
+    axum::Extension(state): axum::Extension<Arc<AppState>>,
     Json(body): Json<BeginPairingConfirmBody>,
 ) -> ApiResult<Json<wealthfolio_device_sync::engine::PairingFlowResponse>> {
     let result = device_sync_engine::begin_pairing_confirm(
@@ -554,7 +557,7 @@ async fn begin_pairing_confirm(
 }
 
 async fn get_pairing_flow_state(
-    State(state): State<Arc<AppState>>,
+    axum::Extension(state): axum::Extension<Arc<AppState>>,
     Json(body): Json<FlowIdBody>,
 ) -> ApiResult<Json<wealthfolio_device_sync::engine::PairingFlowResponse>> {
     let result = device_sync_engine::get_pairing_flow_state_handler(state, body.flow_id)
@@ -564,7 +567,7 @@ async fn get_pairing_flow_state(
 }
 
 async fn approve_pairing_overwrite_endpoint(
-    State(state): State<Arc<AppState>>,
+    axum::Extension(state): axum::Extension<Arc<AppState>>,
     Json(body): Json<FlowIdBody>,
 ) -> ApiResult<Json<wealthfolio_device_sync::engine::PairingFlowResponse>> {
     let result = device_sync_engine::approve_pairing_overwrite_handler(state, body.flow_id)
@@ -574,7 +577,7 @@ async fn approve_pairing_overwrite_endpoint(
 }
 
 async fn cancel_pairing_flow(
-    State(state): State<Arc<AppState>>,
+    axum::Extension(state): axum::Extension<Arc<AppState>>,
     Json(body): Json<FlowIdBody>,
 ) -> ApiResult<Json<wealthfolio_device_sync::engine::PairingFlowResponse>> {
     let result = device_sync_engine::cancel_pairing_flow_handler(state, body.flow_id)
@@ -587,7 +590,7 @@ async fn cancel_pairing_flow(
 // Router
 // ─────────────────────────────────────────────────────────────────────────────
 
-pub fn router() -> Router<Arc<AppState>> {
+pub fn router<S: Clone + Send + Sync + 'static>() -> Router<S> {
     if !crate::features::device_sync_enabled() {
         return Router::new();
     }

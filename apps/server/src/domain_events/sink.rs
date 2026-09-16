@@ -91,7 +91,7 @@ impl WebDomainEventSink {
         categorization_rules_service: Arc<
             wealthfolio_spending::categorization_rules::CategorizationRulesService,
         >,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<tokio::task::JoinHandle<()>> {
         let rx = self.take_receiver()?;
 
         let deps = Arc::new(QueueWorkerDeps {
@@ -117,8 +117,7 @@ impl WebDomainEventSink {
         });
 
         // Spawn the background worker
-        tokio::spawn(event_queue_worker(rx, deps));
-        Ok(())
+        Ok(tokio::spawn(event_queue_worker(rx, deps)))
     }
 
     /// Creates a WebDomainEventSink with just the sender.

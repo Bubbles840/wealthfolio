@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use wealthfolio_core::secrets::SYNC_IDENTITY_KEY;
 use wealthfolio_core::settings::SettingsServiceTrait;
 
@@ -36,9 +36,12 @@ fn transport_err_from_sync(e: wealthfolio_device_sync::DeviceSyncError) -> Trans
     }
 }
 
-static MIN_SNAPSHOT_CREATED_AT: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
-static READY_STATE_OVERWRITE_APPROVALS: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
-static PAIRING_OVERWRITE_APPROVALS: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
+#[derive(Default)]
+pub struct SyncApprovals {
+    min_snapshot: Mutex<HashMap<String, String>>,
+    ready: Mutex<HashMap<String, bool>>,
+    pairing: Mutex<HashMap<String, bool>>,
+}
 const SNAPSHOT_FRESHNESS_CLOCK_SKEW_LEEWAY_SECS: i64 = 120;
 const SYNC_SOURCE_RESTORE_REQUIRED_CODE: &str = "SYNC_SOURCE_RESTORE_REQUIRED";
 
@@ -201,85 +204,85 @@ pub(crate) fn sync_identity_can_run_background(identity: &SyncIdentity) -> bool 
     identity.device_id.is_some() && identity.root_key.is_some()
 }
 
-fn min_snapshot_created_at_state() -> &'static Mutex<HashMap<String, String>> {
-    MIN_SNAPSHOT_CREATED_AT.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn ready_state_overwrite_approval_state() -> &'static Mutex<HashMap<String, bool>> {
-    READY_STATE_OVERWRITE_APPROVALS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn pairing_overwrite_approval_state() -> &'static Mutex<HashMap<String, bool>> {
-    PAIRING_OVERWRITE_APPROVALS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-pub fn set_min_snapshot_created_at_in_store(device_id: &str, value: &str) -> Result<(), String> {
+pub fn set_min_snapshot_created_at_in_store(
+    state: &AppState,
+    device_id: &str,
+    value: &str,
+) -> Result<(), String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return Ok(());
     }
-    let mut guard = min_snapshot_created_at_state()
+    let mut guard = state
+        .sync_approvals
+        .min_snapshot
         .lock()
         .map_err(|_| "Failed to lock in-memory freshness gate".to_string())?;
     guard.insert(device_id.to_string(), trimmed.to_string());
     Ok(())
 }
 
-fn remove_min_snapshot_created_at_from_store(device_id: &str) {
-    if let Ok(mut guard) = min_snapshot_created_at_state().lock() {
+fn remove_min_snapshot_created_at_from_store(state: &AppState, device_id: &str) {
+    if let Ok(mut guard) = state.sync_approvals.min_snapshot.lock() {
         guard.remove(device_id);
     }
 }
 
-pub fn clear_min_snapshot_created_at_from_store() {
-    if let Ok(mut guard) = min_snapshot_created_at_state().lock() {
+pub fn clear_min_snapshot_created_at_from_store(state: &AppState) {
+    if let Ok(mut guard) = state.sync_approvals.min_snapshot.lock() {
         guard.clear();
     }
 }
 
-fn get_min_snapshot_created_at_from_store(device_id: &str) -> Option<String> {
-    min_snapshot_created_at_state()
+fn get_min_snapshot_created_at_from_store(state: &AppState, device_id: &str) -> Option<String> {
+    state
+        .sync_approvals
+        .min_snapshot
         .lock()
         .ok()
         .and_then(|map| map.get(device_id).cloned())
 }
 
-fn has_ready_state_overwrite_approval(device_id: &str) -> bool {
-    ready_state_overwrite_approval_state()
+fn has_ready_state_overwrite_approval(state: &AppState, device_id: &str) -> bool {
+    state
+        .sync_approvals
+        .ready
         .lock()
         .ok()
         .and_then(|map| map.get(device_id).copied())
         .unwrap_or(false)
 }
 
-fn set_ready_state_overwrite_approval(device_id: &str) {
-    if let Ok(mut guard) = ready_state_overwrite_approval_state().lock() {
+fn set_ready_state_overwrite_approval(state: &AppState, device_id: &str) {
+    if let Ok(mut guard) = state.sync_approvals.ready.lock() {
         guard.insert(device_id.to_string(), true);
     }
 }
 
-fn clear_ready_state_overwrite_approval(device_id: &str) {
-    if let Ok(mut guard) = ready_state_overwrite_approval_state().lock() {
+fn clear_ready_state_overwrite_approval(state: &AppState, device_id: &str) {
+    if let Ok(mut guard) = state.sync_approvals.ready.lock() {
         guard.remove(device_id);
     }
 }
 
-fn has_pairing_overwrite_approval(pairing_id: &str) -> bool {
-    pairing_overwrite_approval_state()
+fn has_pairing_overwrite_approval(state: &AppState, pairing_id: &str) -> bool {
+    state
+        .sync_approvals
+        .pairing
         .lock()
         .ok()
         .and_then(|map| map.get(pairing_id).copied())
         .unwrap_or(false)
 }
 
-fn set_pairing_overwrite_approval(pairing_id: &str) {
-    if let Ok(mut guard) = pairing_overwrite_approval_state().lock() {
+fn set_pairing_overwrite_approval(state: &AppState, pairing_id: &str) {
+    if let Ok(mut guard) = state.sync_approvals.pairing.lock() {
         guard.insert(pairing_id.to_string(), true);
     }
 }
 
-fn clear_pairing_overwrite_approval(pairing_id: &str) {
-    if let Ok(mut guard) = pairing_overwrite_approval_state().lock() {
+fn clear_pairing_overwrite_approval(state: &AppState, pairing_id: &str) {
+    if let Ok(mut guard) = state.sync_approvals.pairing.lock() {
         guard.remove(pairing_id);
     }
 }
@@ -301,7 +304,7 @@ fn pairing_bootstrap_phase(
 }
 
 async fn abort_pairing_flow_local_state(state: &Arc<AppState>, pairing_id: &str) {
-    clear_pairing_overwrite_approval(pairing_id);
+    clear_pairing_overwrite_approval(&state, pairing_id);
 
     let device_id = get_sync_identity_from_store(state).and_then(|identity| identity.device_id);
     if let Some(device_id) = device_id.as_deref() {
@@ -315,7 +318,7 @@ async fn abort_pairing_flow_local_state(state: &Arc<AppState>, pairing_id: &str)
                 );
             }
         }
-        remove_min_snapshot_created_at_from_store(device_id);
+        remove_min_snapshot_created_at_from_store(&state, device_id);
         let _ = state
             .app_sync_repository
             .clear_min_snapshot_created_at(device_id.to_string())
@@ -335,7 +338,7 @@ async fn abort_pairing_flow_local_state(state: &Arc<AppState>, pairing_id: &str)
         );
     }
     let _ = state.app_sync_repository.reset_local_sync_session().await;
-    clear_min_snapshot_created_at_from_store();
+    clear_min_snapshot_created_at_from_store(&state);
     let _ = state
         .app_sync_repository
         .clear_all_min_snapshot_created_at()
@@ -794,7 +797,7 @@ pub async fn get_bootstrap_overwrite_check(
     };
     if !bootstrap_required {
         if let Some(device_id) = device_id.as_deref() {
-            clear_ready_state_overwrite_approval(device_id);
+            clear_ready_state_overwrite_approval(&state, device_id);
         }
         return Ok(SyncBootstrapOverwriteCheckResult {
             bootstrap_required,
@@ -805,7 +808,7 @@ pub async fn get_bootstrap_overwrite_check(
     }
 
     if let Some(device_id) = device_id.as_deref() {
-        if has_ready_state_overwrite_approval(device_id) {
+        if has_ready_state_overwrite_approval(&state, device_id) {
             return Ok(SyncBootstrapOverwriteCheckResult {
                 bootstrap_required,
                 has_local_data: false,
@@ -901,23 +904,25 @@ pub async fn reconcile_ready_state(
     let device_id = get_sync_identity_from_store(&state).and_then(|identity| identity.device_id);
     let has_overwrite_approval = device_id
         .as_deref()
-        .map(has_ready_state_overwrite_approval)
+        .map(|id| has_ready_state_overwrite_approval(&state, id))
         .unwrap_or(false);
     if allow_overwrite {
         if let Some(device_id) = device_id.as_deref() {
-            set_ready_state_overwrite_approval(device_id);
+            set_ready_state_overwrite_approval(&state, device_id);
         }
     }
-    let runner = ServerReadyReconcileRunner { state };
+    let runner = ServerReadyReconcileRunner {
+        state: state.clone(),
+    };
     let result = engine::run_ready_reconcile_state(&runner).await;
 
     if let Some(device_id) = device_id.as_deref() {
         if (allow_overwrite || has_overwrite_approval)
             && should_keep_ready_state_overwrite_approval(&result)
         {
-            set_ready_state_overwrite_approval(device_id);
+            set_ready_state_overwrite_approval(&state, device_id);
         } else {
-            clear_ready_state_overwrite_approval(device_id);
+            clear_ready_state_overwrite_approval(&state, device_id);
         }
     }
 
@@ -925,6 +930,10 @@ pub async fn reconcile_ready_state(
 }
 
 pub async fn ensure_background_engine_started(state: Arc<AppState>) -> Result<(), String> {
+    let _lifecycle = state.profile_lifecycle.lock().await;
+    if let Some((registry, id)) = state.profile_binding.get() {
+        registry.profile(*id).map_err(|e| e.to_string())?;
+    }
     ensure_device_sync_enabled()?;
     if state
         .settings_service
@@ -1080,13 +1089,14 @@ pub async fn sync_bootstrap_snapshot_if_needed(
         .await
         .map_err(|e| e.to_string())?;
     // Check in-memory first, then fall back to SQLite (survives restart)
-    let raw_freshness_gate = get_min_snapshot_created_at_from_store(&device_id).or_else(|| {
-        state
-            .app_sync_repository
-            .get_min_snapshot_created_at(&device_id)
-            .ok()
-            .flatten()
-    });
+    let raw_freshness_gate =
+        get_min_snapshot_created_at_from_store(&state, &device_id).or_else(|| {
+            state
+                .app_sync_repository
+                .get_min_snapshot_created_at(&device_id)
+                .ok()
+                .flatten()
+        });
     let min_snapshot_created_at = match raw_freshness_gate {
         Some(value) => match wealthfolio_device_sync::normalize_sync_datetime(&value) {
             Ok(normalized) => Some(normalized),
@@ -1095,7 +1105,7 @@ pub async fn sync_bootstrap_snapshot_if_needed(
                     "[DeviceSync] Dropping invalid min snapshot freshness gate: {}",
                     value
                 );
-                remove_min_snapshot_created_at_from_store(&device_id);
+                remove_min_snapshot_created_at_from_store(&state, &device_id);
                 let _ = state
                     .app_sync_repository
                     .clear_min_snapshot_created_at(device_id.clone())
@@ -1137,7 +1147,7 @@ pub async fn sync_bootstrap_snapshot_if_needed(
             Some("WAIT_SNAPSHOT") | Some("BOOTSTRAP_SNAPSHOT")
         );
         if !reconcile_requires_snapshot {
-            clear_min_snapshot_created_at_from_store();
+            clear_min_snapshot_created_at_from_store(&state);
             return Ok(SyncBootstrapResult {
                 status: "skipped".to_string(),
                 message: "Snapshot bootstrap already completed".to_string(),
@@ -1183,7 +1193,7 @@ pub async fn sync_bootstrap_snapshot_if_needed(
                             .reset_and_mark_bootstrap_complete(device_id, identity.key_version)
                             .await
                             .map_err(|e| e.to_string())?;
-                        clear_min_snapshot_created_at_from_store();
+                        clear_min_snapshot_created_at_from_store(&state);
                         return Ok(SyncBootstrapResult {
                             status: "skipped".to_string(),
                             message,
@@ -1227,7 +1237,7 @@ pub async fn sync_bootstrap_snapshot_if_needed(
                         .reset_and_mark_bootstrap_complete(device_id, identity.key_version)
                         .await
                         .map_err(|e| e.to_string())?;
-                    clear_min_snapshot_created_at_from_store();
+                    clear_min_snapshot_created_at_from_store(&state);
                     return Ok(SyncBootstrapResult {
                         status: "skipped".to_string(),
                         message,
@@ -1326,7 +1336,7 @@ pub async fn sync_bootstrap_snapshot_if_needed(
     let sqlite_image = decode_snapshot_sqlite_payload(blob, &identity)?;
     // App-private storage, not the shared system temp directory: the snapshot
     // image is a plaintext copy of synced financial rows.
-    let scratch_dir = wealthfolio_storage_sqlite::db::scratch_dir(&state.data_root)
+    let scratch_dir = wealthfolio_storage_sqlite::db::profile_scratch_dir(&state.data_root)
         .map_err(|e| format!("Failed to prepare the snapshot scratch directory: {}", e))?;
     let temp_snapshot_path = scratch_dir.join(format!("wf_snapshot_server_{}.db", Uuid::new_v4()));
     std::fs::write(&temp_snapshot_path, sqlite_image)
@@ -1363,7 +1373,7 @@ pub async fn sync_bootstrap_snapshot_if_needed(
         .emit(DomainEvent::device_sync_pull_complete());
 
     // Clear freshness gate from both in-memory and SQLite
-    clear_min_snapshot_created_at_from_store();
+    clear_min_snapshot_created_at_from_store(&state);
     if let Err(err) = sync_repo.clear_min_snapshot_created_at(device_id).await {
         tracing::warn!(
             "[DeviceSync] Failed to clear freshness gate from SQLite: {}",
@@ -1719,7 +1729,7 @@ pub async fn confirm_pairing_with_bootstrap(
                 if let Ok(normalized) =
                     wealthfolio_device_sync::normalize_sync_datetime(min_created_at)
                 {
-                    let _ = set_min_snapshot_created_at_in_store(&device_id, &normalized);
+                    let _ = set_min_snapshot_created_at_in_store(&state, &device_id, &normalized);
                     let _ = state
                         .app_sync_repository
                         .set_min_snapshot_created_at(device_id.clone(), normalized)
@@ -1735,7 +1745,7 @@ pub async fn confirm_pairing_with_bootstrap(
         .needs_bootstrap(&device_id)
         .map_err(|e| e.to_string())?;
     if !needs_bootstrap {
-        clear_pairing_overwrite_approval(&pairing_id);
+        clear_pairing_overwrite_approval(&state, &pairing_id);
         return Ok(ConfirmPairingWithBootstrapResult {
             status: "already_complete".to_string(),
             message: "No bootstrap needed".to_string(),
@@ -1746,9 +1756,9 @@ pub async fn confirm_pairing_with_bootstrap(
 
     // 4. Check overwrite risk
     if allow_overwrite {
-        set_pairing_overwrite_approval(&pairing_id);
+        set_pairing_overwrite_approval(&state, &pairing_id);
     }
-    let overwrite_approved = allow_overwrite || has_pairing_overwrite_approval(&pairing_id);
+    let overwrite_approved = allow_overwrite || has_pairing_overwrite_approval(&state, &pairing_id);
     if !overwrite_approved {
         let summary = state
             .app_sync_repository
@@ -1801,7 +1811,7 @@ pub async fn confirm_pairing_with_bootstrap(
         }
     });
 
-    clear_pairing_overwrite_approval(&pairing_id);
+    clear_pairing_overwrite_approval(&state, &pairing_id);
 
     Ok(ConfirmPairingWithBootstrapResult {
         status: "applied".to_string(),
@@ -1867,7 +1877,7 @@ pub async fn begin_pairing_confirm(
                 if let Ok(normalized) =
                     wealthfolio_device_sync::normalize_sync_datetime(min_created_at)
                 {
-                    let _ = set_min_snapshot_created_at_in_store(&device_id, &normalized);
+                    let _ = set_min_snapshot_created_at_in_store(&state, &device_id, &normalized);
                     let _ = state
                         .app_sync_repository
                         .set_min_snapshot_created_at(device_id.clone(), normalized)
@@ -1970,7 +1980,7 @@ pub async fn get_pairing_flow_state_handler(
                             }
                         });
                         if let Some(pid) = runtime.get_flow_pairing_id(&flow_id)? {
-                            clear_pairing_overwrite_approval(&pid);
+                            clear_pairing_overwrite_approval(&state, &pid);
                         }
                         runtime.remove_flow(&flow_id)?;
                         return Ok(PairingFlowResponse {
@@ -1980,7 +1990,7 @@ pub async fn get_pairing_flow_state_handler(
                     }
                     Err(e) => {
                         if let Some(pid) = runtime.get_flow_pairing_id(&flow_id)? {
-                            clear_pairing_overwrite_approval(&pid);
+                            clear_pairing_overwrite_approval(&state, &pid);
                         }
                         runtime.remove_flow(&flow_id)?;
                         return Ok(PairingFlowResponse {
@@ -1991,7 +2001,7 @@ pub async fn get_pairing_flow_state_handler(
                 },
                 Err(e) => {
                     if let Some(pid) = runtime.get_flow_pairing_id(&flow_id)? {
-                        clear_pairing_overwrite_approval(&pid);
+                        clear_pairing_overwrite_approval(&state, &pid);
                     }
                     runtime.remove_flow(&flow_id)?;
                     return Ok(PairingFlowResponse {
@@ -2024,7 +2034,7 @@ pub async fn approve_pairing_overwrite_handler(
         .get_flow_pairing_id(&flow_id)?
         .ok_or_else(|| "Flow not found".to_string())?;
 
-    set_pairing_overwrite_approval(&pairing_id);
+    set_pairing_overwrite_approval(&state, &pairing_id);
 
     runtime.set_flow_phase(
         &flow_id,
@@ -2038,7 +2048,7 @@ pub async fn approve_pairing_overwrite_handler(
             if let Some(phase) = match pairing_bootstrap_phase(&bootstrap) {
                 Ok(phase) => phase,
                 Err(e) => {
-                    clear_pairing_overwrite_approval(&pairing_id);
+                    clear_pairing_overwrite_approval(&state, &pairing_id);
                     runtime.remove_flow(&flow_id)?;
                     return Ok(PairingFlowResponse {
                         flow_id,
@@ -2057,7 +2067,7 @@ pub async fn approve_pairing_overwrite_handler(
                     tracing::warn!("[DeviceSync] Post-overwrite engine start failed: {}", err);
                 }
             });
-            clear_pairing_overwrite_approval(&pairing_id);
+            clear_pairing_overwrite_approval(&state, &pairing_id);
             runtime.remove_flow(&flow_id)?;
             Ok(PairingFlowResponse {
                 flow_id,
@@ -2065,7 +2075,7 @@ pub async fn approve_pairing_overwrite_handler(
             })
         }
         Err(e) => {
-            clear_pairing_overwrite_approval(&pairing_id);
+            clear_pairing_overwrite_approval(&state, &pairing_id);
             runtime.remove_flow(&flow_id)?;
             Ok(PairingFlowResponse {
                 flow_id,

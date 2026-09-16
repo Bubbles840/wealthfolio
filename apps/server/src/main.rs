@@ -11,6 +11,7 @@ mod main_lib;
 mod mcp;
 mod models;
 mod oidc;
+mod profiles;
 mod scheduler;
 mod secrets;
 mod static_files;
@@ -27,8 +28,26 @@ fn run_maintenance_cli(args: &[String]) -> Option<anyhow::Result<()>> {
         return None;
     }
 
+    let mut selected = None;
+    let mut filtered = args.to_vec();
+    if let Some(index) = filtered.iter().position(|s| s == "--profile") {
+        let value = match filtered
+            .get(index + 1)
+            .and_then(|s| uuid::Uuid::parse_str(s).ok())
+        {
+            Some(id) => id,
+            None => {
+                return Some(Err(anyhow::anyhow!(
+                    "--profile requires a registered profile UUID"
+                )))
+            }
+        };
+        selected = Some(value);
+        filtered.drain(index..=index + 1);
+    }
+    let args = filtered.as_slice();
     if args.get(1).map(String::as_str) == Some("restore") {
-        return Some(run_restore_cli(&args[2..]));
+        return Some(run_restore_cli(&args[2..], selected));
     }
 
     // Once `db` is given, a missing or unknown subcommand is an error. Falling
@@ -48,11 +67,18 @@ fn run_maintenance_cli(args: &[String]) -> Option<anyhow::Result<()>> {
         }
     };
 
+    if args.len() != 2 {
+        return Some(Err(anyhow::anyhow!(
+            "Unexpected database maintenance arguments"
+        )));
+    }
     init_tracing();
-    Some(main_lib::run_database_maintenance(encrypt))
+    Some(main_lib::run_profile_database_maintenance(
+        encrypt, selected,
+    ))
 }
 
-fn run_restore_cli(args: &[String]) -> anyhow::Result<()> {
+fn run_restore_cli(args: &[String], profile: Option<uuid::Uuid>) -> anyhow::Result<()> {
     use std::io::{IsTerminal, Read};
     let path = args
         .first()
@@ -77,10 +103,11 @@ fn run_restore_cli(args: &[String]) -> anyhow::Result<()> {
         anyhow::ensure!(password.len() <= 4096, "Backup password is too long");
     }
     init_tracing();
-    database_restore::run_database_restore(
+    database_restore::run_profile_database_restore(
         std::path::Path::new(path),
         password_stdin.then_some(password.as_str()),
         confirmed,
+        profile,
     )
 }
 
@@ -105,10 +132,9 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("Authentication disabled");
     }
     tracing::info!("Listening on {}", config.listen_addr);
-    let state = main_lib::build_state(&config).await?;
-    scheduler::start_background_workers(state.clone());
     let static_dir = std::path::PathBuf::from(&config.static_dir);
-    let router = api::app_router(state.clone(), &config)?
+    let router = api::app_router_from_config(&config)
+        .await?
         .fallback_service(static_files::router(&static_dir))
         .layer(axum::middleware::from_fn(api::security_headers));
     let result = axum::serve(
