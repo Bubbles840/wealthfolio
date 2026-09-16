@@ -210,7 +210,32 @@ pub fn profile_cover_ready(epoch: u64) -> Result<(), String> {
             })
             .map_err(|e| e.to_string())?;
     }
-    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+    #[cfg(target_os = "android")]
+    {
+        let window = APP
+            .get()
+            .and_then(|h| h.get_webview_window("main"))
+            .ok_or("Privacy window unavailable")?;
+        window
+            .with_webview(move |webview| {
+                webview.jni_handle().exec(move |env, activity, _| {
+                    let Ok(mut active) = ACTIVE_COVER.lock() else {
+                        return;
+                    };
+                    if !accept_cover_ack(*active, epoch) {
+                        return;
+                    }
+                    match env.call_method(activity, "onProfileCoverReady", "()V", &[]) {
+                        Ok(_) => *active = 0,
+                        Err(error) => {
+                            log::error!("Unable to acknowledge Android privacy cover: {error}")
+                        }
+                    }
+                });
+            })
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "android")))]
     {
         let mut active = ACTIVE_COVER
             .lock()
