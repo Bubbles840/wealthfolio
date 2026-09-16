@@ -32,6 +32,17 @@ Different devices can use different local UUIDs for the same Connect user.
 
 ## Storage and legacy adoption
 
+Desktop development can set `WF_DATA_DIR` in the root `.env` to an absolute
+path. It takes precedence over `DATABASE_URL` for registry creation and legacy
+database discovery. New databases remain under `profiles/<id>/app.db`; an
+existing `app.db` in that directory is adopted using the usual migration rules.
+An empty/unset value keeps normal path resolution. Invalid or unwritable paths
+fail startup rather than falling back to production data. Release, packaged
+(`custom-protocol`), and mobile builds ignore `WF_DATA_DIR` and retain their
+normal Tauri app-data root and existing legacy database behavior. This does not
+move existing data or change OS keychain storage; use a fresh development folder
+rather than copying a production registry with its profile IDs and saved paths.
+
 New profiles use this layout:
 
 ```text
@@ -176,7 +187,9 @@ Protected sessions expire after five minutes without user activity. Native OS
 lock/suspend and mobile deactivation also trigger protection. Polling and
 background sync do not extend the idle deadline. The Apple privacy cover is an
 opaque native surface above a visible WebView, with epoch-checked removal after
-the renderer presents a safe surface and a recovery reload action. Native
+the renderer presents a safe surface and a recovery reload action. Android
+sets `FLAG_SECURE` while backgrounded and clears it only after the current
+cover epoch has been acknowledged and the activity has resumed. Native
 lifecycle behavior needs platform testing; JavaScript visibility alone is not
 the privacy boundary.
 
@@ -285,9 +298,49 @@ pauses cloud work without blocking local access.
 
 Candidate credentials are verified before binding. Serialized identity
 reservation prevents the same issuer/user ID from attaching to multiple local
-profiles. Binding uses user ID rather than email and survives sign-out. The
-current policy rejects a different account or changed team on a bound profile;
-account/team rebinding and reset are outside this feature.
+profiles. Binding uses user ID rather than email and survives sign-out. A different
+account or team requires explicit confirmation. The cloud sync scope
+is `(teamId, userId)`; profiles are local and never sent as cloud identities.
+
+Automatic cloud admission re-fetches the verified user/team binding, even when
+its access token has not changed. This applies to foreground requests and queued
+broker sync. Missing legacy ownership or changed membership pauses cloud work
+and requires explicit reconnection; automatic restoration never adopts a binding.
+A user/team preflight is not atomic with the subsequent cloud request. Preventing
+membership changes between those requests requires a cloud API contract that
+checks the expected user/team on the operation itself; the current API does not
+provide that guarantee.
+
+Temporary Connect transition contention returns HTTP 503, not the HTTP 423 used
+for revoked profile authority. The frontend retains its valid local session and
+can retry after the transition completes.
+
+The confirmation preview does not persist candidate credentials or change the
+binding. A rotated candidate refresh token is kept only in process memory, with a
+ten-minute validity window, so confirmation can retry after a human delay.
+Confirmation revalidates the candidate against the cloud. Duplicate local account
+reservations remain forbidden, including confirmed requests. Ordinary sign-out
+keeps the last binding so reconnecting the same account retains enrollment and
+switching to another account cannot reuse its keys or cursors. Unbound migrated
+profiles with existing cloud credentials or enrollment also require confirmation
+and cleanup, because ownership of that existing state has not been verified.
+
+A confirmed change excludes in-flight profile commands, reserves broker sync,
+and serializes login/logout/token refresh. Pairing key writes must match the
+current device ID and enrollment nonce; stale UI callbacks cannot recreate an
+identity cleared by rebinding. Background engine startup is paused
+and the previous worker is stopped and joined. Cleanup clears local enrollment
+and sync keys, pairing consent/flows, outbox/cursors and broker mappings. Accounts,
+holdings, activities, database encryption keys, the local password and unrelated
+secrets remain. Broker mappings and sync control state are cleared in one SQLite
+writer transaction. No cloud reset or deletion is invoked. Device sync must be
+set up again explicitly; retained portfolio data may later be synced to the new
+account after that setup.
+
+Cleanup failures leave cloud access gated off and do not store candidate
+credentials. The old binding remains until cleanup succeeds. A failed credential
+write after successful rebinding leaves reconnect required; retrying the verified
+new account can safely complete login.
 
 Supabase keeps its existing login and code-exchange behavior with profile/flow
 scoped backend PKCE storage. One pending login is allowed per native
@@ -312,10 +365,12 @@ profile, and browser locking does not revoke independent PAT authorization.
 
 ## Scope and verification boundaries
 
-Biometrics, permanent profile deletion, account/team rebinding, a new web-user
-ownership system, and cloud household enrollment changes are outside this
-feature. Local profiles do not resolve the cloud mismatch between team-wide
-enrollment and same-user pairing; that requires a separate cloud correction.
+Biometrics, a new web-user ownership system, and cloud household enrollment
+changes are outside this
+feature. This app targets the separately implemented cloud user-scoped sync
+adaptation: enrollment, pairing, cursors and snapshots belong to `(teamId, userId)`.
+Deploy that cloud adaptation before relying on separation between members of the
+same team. No cloud code is changed by this app feature.
 
 Regression coverage belongs with the core registry/session tests, native
 lifecycle tests, server profile integration tests, frontend profile/startup
