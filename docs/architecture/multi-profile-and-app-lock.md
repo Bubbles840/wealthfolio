@@ -1,0 +1,335 @@
+# Profiles and application lock
+
+Profiles separate portfolios and credentials within one Wealthfolio installation
+on desktop, mobile, and self-hosted web. This document describes the feature's
+architecture, access boundaries, and lifecycle. See
+[credential storage](credential-storage.md) for platform stores and
+[database encryption and backups](database-encryption-and-backups.md) for
+encryption, export, and restore mechanics.
+
+## Ownership and components
+
+Each profile has a stable local UUID, name, bundled avatar ID, database, secret
+namespace, and service context. Financial tables do not need a `profile_id`
+column: existing repositories operate on the admitted profile's database. The
+backend owns authorization and resource selection; the renderer receives a
+revocable session, never a caller-selected database path or secret namespace.
+
+| Component                                                                    | Responsibility                                                             |
+| ---------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| [Core profiles](../../crates/core/src/profiles/mod.rs)                       | Shared types, avatar allowlist, scoped secret store                        |
+| [Registry](../../crates/core/src/profiles/registry.rs)                       | Persistent metadata, legacy adoption, passwords, recovery, Connect binding |
+| [Sessions](../../crates/core/src/profiles/sessions.rs)                       | Grants, revocation, idle expiry                                            |
+| [Native profiles](../../apps/tauri/src/profiles.rs)                          | IPC admission and active-profile lifecycle                                 |
+| [Native lifecycle](../../apps/tauri/src/profile_lifecycle.rs)                | OS lifecycle notifications and privacy cover                               |
+| [Server profiles](../../apps/server/src/profiles.rs)                         | Per-profile runtimes, browser grants, HTTP and MCP routing                 |
+| [Profile shell](../../apps/frontend/src/features/profiles/profile-shell.tsx) | Chooser, password management, recovery, startup transitions                |
+| [Auth bridge](../../apps/frontend/src/features/profiles/auth-bridge.ts)      | OAuth ownership and scoped PKCE storage                                    |
+
+Names, avatars, passwords, and Connect bindings are installation-local. They do
+not synchronize with financial data or transfer through portable backups.
+Different devices can use different local UUIDs for the same Connect user.
+
+## Storage and legacy adoption
+
+New profiles use this layout:
+
+```text
+application-data/
+  profiles.json
+  profiles.json.bak
+  profiles/
+    <profile-uuid>/
+      app.db
+      backups/
+      scratch/
+      addons/
+```
+
+The registry stores metadata and verified Connect bindings, but no passwords,
+tokens, or encryption keys. Registry changes are serialized and written
+atomically with a last-valid backup. Paths derive from validated UUIDs and
+registered layouts. Backups, snapshot staging, imports, exports, add-on files,
+and cleanup use the same owning profile as the database.
+
+An existing installation becomes the default Personal profile without moving its
+database or copying credentials. It retains its database key, backups, sync
+enrollment, existing path override, and legacy secret namespace. Only that
+profile can own the legacy namespace. New profiles receive UUID-based paths and
+secret prefixes. Profile selection does not mutate process environment
+variables.
+
+Initialization is idempotent. Missing legacy data must not attach leftover
+credentials to a new empty database. Missing registry metadata alongside
+existing profile directories is a recovery condition. Cleanup of a legacy
+profile must not recursively delete the installation root containing other
+profiles.
+
+`ScopedSecretStore` fixes the namespace at construction, including legacy add-on
+key fallbacks. Native profiles use the OS credential store. Web profiles share
+one underlying encrypted vault so its write locking remains effective.
+
+## Passwords and access recovery
+
+A profile password protects access through Wealthfolio. It is independent of
+optional database encryption and does not encrypt or derive the database key. An
+unencrypted database remains readable outside the app. The trusted OS account or
+server operator is outside this application-access boundary; a reload or context
+teardown does not guarantee memory erasure.
+
+| Material                       | Protection                                              |
+| ------------------------------ | ------------------------------------------------------- |
+| Profile password               | Salted Argon2id verifier in the profile secret store    |
+| Recovery code                  | Domain-separated SHA-256 hash in the same lock record   |
+| Failed attempts                | Persisted counter and cooldown in the lock record       |
+| Native database key            | Independent random key in native credential storage     |
+| Web database key               | Operator master-key derivation, scoped for new profiles |
+| Connect and device credentials | Profile-scoped secret store                             |
+
+Passwords accept 8–128 Unicode characters, preserving spaces and exact text.
+Existing six-digit PIN verifiers remain usable for unlock and credential
+changes. New verifiers use Argon2id with 19 MiB memory, two iterations, one
+lane, a random salt, and encoded parameters. Hosts run verification outside the
+async executor.
+
+After five failed attempts, verification imposes a 30-second cooldown;
+subsequent cooldowns double up to 15 minutes. Successful verification clears
+failures. Restarting or changing browser sessions does not reset persisted
+attempts. Lock-record writes are read back before success is reported. Registry
+`lockEnabled` is only a display hint: missing or unreadable protected records
+must fail closed.
+
+### Setup, change, disable, and recovery
+
+- Initial password setup requires an admitted profile session. The UI requires
+  matching password confirmation and acknowledgement of the recovery code.
+- Setup generates a random 128-bit recovery code, displayed in grouped
+  hexadecimal form. Its plaintext is returned for that setup flow; only its hash
+  is stored.
+- Changing or disabling protection requires the current password or recovery
+  code. Recovery replaces the password and rotates the recovery code.
+- Credential changes revoke existing profile grants. They do not rekey the
+  database, reset device sync, or sign out Connect.
+- Neither the password nor the recovery code can recover a lost database key.
+  Losing both access proofs provides no supported password-reset bypass.
+
+Generic secret APIs cannot read or overwrite lock records, database keys, or
+internal Connect credentials. Existing pairing identity operations use narrowly
+scoped APIs. Passwords and pending login verifiers are not stored in
+localStorage.
+
+### Database recovery
+
+Access recovery and database recovery are separate. After authorization, native
+startup can issue a restricted recovery grant when the database fails to open.
+Only that profile's status and recovery operations are admitted until a live
+context exists. Successful database installation rotates the scope.
+
+The database gate keeps retry and permitted backup recovery reachable without
+revealing financial routes. A transport error does not establish corruption; a
+locked or stale scope returns control to the profile shell. Restore remains
+owned by the backend even if its view closes, and completion cannot reopen a
+session revoked during maintenance.
+
+Portable restore preserves the destination local profile and password, applying
+existing reconnection and credential-clearing behavior only to that profile.
+Legacy web databases retain their original key derivation; new web databases use
+a versioned profile-specific derivation. Native keys needed by older encrypted
+backups remain retained after encryption is disabled.
+
+## Session admission and runtime lifecycle
+
+`ProfileSummary` exposes ID, name, avatar ID, and lock indicator.
+`ProfileSession` carries `profileId` and an opaque `scopeId`. Admission maps the
+scope to the fixed profile and, on native, the database generation. Lock,
+switch, credential changes, and native database rebuilds revoke or replace
+scopes.
+
+The financial renderer freezes its scope for the document lifetime. A new scope
+requires a fresh application load; older async work cannot read a mutable global
+and acquire the destination profile's authority. Adapters attach the scope to
+IPC, HTTP, streaming, file, and add-on operations. Only classified shell/auth
+operations work before unlock.
+
+Commands capture their admitted context before awaiting or spawning work.
+Already-admitted transactions stay with their original database; revocation does
+not roll back committed work. Stale responses, events, streams, and temporary
+approvals must not be delivered into another session. Database suspension,
+maintenance gates, and file leases coordinate work with teardown. Filesystem
+helpers receive an admitted root path rather than consulting a current profile.
+
+### Native
+
+One profile is active at a time. Lock or switch immediately covers financial UI
+and revokes admission, then stops interactive work, workers, device sync, and
+embedded MCP through the existing database lifecycle. The writer and database
+ownership are released before another profile opens. Ownership failure leaves
+the app inaccessible rather than activating a second context.
+
+Unlock rebuilds the service context. Full document navigation clears financial
+queries, add-on/provider state, and ordinary pairing state. Critical database
+maintenance remains app-owned and pinned to its original runtime. Internal file
+transfers use admitted commands; native capabilities restrict direct app-data
+access while preserving picker-granted external files.
+
+Protected sessions expire after five minutes without user activity. Native OS
+lock/suspend and mobile deactivation also trigger protection. Polling and
+background sync do not extend the idle deadline. The Apple privacy cover is an
+opaque native surface above a visible WebView, with epoch-checked removal after
+the renderer presents a safe surface and a recovery reload action. Native
+lifecycle behavior needs platform testing; JavaScript visibility alone is not
+the privacy boundary.
+
+### Self-hosted web
+
+A root manager owns the registry, shared vault, runtime lookup, and browser
+grants. Each profile has an existing `Arc<AppState>` service graph, writer,
+event bus, and workers. Browsers using the same profile share that runtime.
+Configured connected profiles start at server startup; others open on demand.
+
+Instance authentication and profile access are distinct. Authenticated cookies'
+stable `sid` values own grants; no-auth mode uses a unique opaque HttpOnly
+browser cookie. Tabs sharing an owner share lock/switch state. Other browsers
+remain independent. Profile lock does not log out instance authentication or
+stop server sync workers.
+
+Middleware validates the browser owner and `x-wf-profile-scope`, then injects
+the fixed runtime into request extensions. SSE uses the cookie plus a non-secret
+scope selector; the selector alone grants no access. Grant mutations enforce
+same-origin checks. Revocation closes affected streams and rejects stale
+delivery. Legacy unscoped API access is limited to a single unprotected default
+profile.
+
+Offline database maintenance accepts `--profile <uuid>`; omission selects the
+default profile. Operator database encryption remains separate from browser
+lock.
+
+## Startup and switching
+
+| Entry                                | Behavior                                                                    |
+| ------------------------------------ | --------------------------------------------------------------------------- |
+| Cold launch, one unprotected profile | Backend auto-admission, then opening surface and portfolio                  |
+| Cold launch, one protected profile   | Chooser with that profile selected; click to enter password                 |
+| Cold launch, multiple profiles       | Chooser after authoritative status resolves                                 |
+| Switch profile                       | Cover and teardown, chooser, optional password, destination dashboard       |
+| Manual or automatic lock             | Retain selected profile in the chooser; click to continue or enter password |
+| Resume same profile                  | Preserve route through document reload                                      |
+| Create profile                       | Open its dashboard; existing onboarding handles first setup                 |
+| Database or initial settings failure | Explicit error with retry and permitted recovery/switch actions             |
+| Connect restoration or outage        | Local portfolio stays usable; Connect reports its own status                |
+
+A manually locked unprotected profile requires a click to reopen. Switching is
+disabled while teardown is pending or failed. Status reads are serialized and
+older transition results discarded. Browser-tab scope replacement follows the
+same fresh-document rule: a different profile goes to the dashboard; a
+replacement scope for the same profile retains its route. A native process
+restart follows cold-launch policy rather than document-reload route continuity.
+
+The provider sequence is:
+
+```text
+AuthGate (web) → ProfileShell → NativeDatabaseGate → SettingsProvider
+              → WealthfolioConnectProvider → financial providers/routes
+```
+
+The pre-React splash, shared `StartupScreen`, database gate, and initial
+settings gate provide a consistent opening presentation. Settings apply theme,
+font, direction, and language before revealing routes. Later refreshes keep
+routes mounted. The Connect capability check selects its provider before
+children mount; network restoration does not gate the local portfolio.
+
+A short-lived per-tab sessionStorage hint carries transition intent and public
+profile metadata across reload. It expires after five minutes, validates bundled
+avatar IDs, and never contains authority, passwords, keys, callback codes, or
+financial routes. Backend status remains authoritative if the hint is absent,
+invalid, or disagrees. Reload requests coalesce, including OAuth deferral.
+
+## Avatars
+
+Avatars are bundled assets available offline, selected by stable IDs rather than
+uploaded files or remote URLs. The registry stores only `avatarId`; the renderer
+maps it to artwork. Names and avatars are visible before unlock and must not be
+used as authorization or Connect identity.
+
+The
+[avatar renderer](../../apps/frontend/src/features/profiles/profile-avatar.tsx)
+defines Sketch, Line, Pixel art, 3D, and Abstract groups. The
+[picker](../../apps/frontend/src/features/profiles/profile-avatar-picker.tsx)
+filters these groups and exposes selected state through labeled buttons. Unknown
+renderer IDs fall back to the first line portrait; backend create/update and
+registry validation require an ID in the core allowlist.
+
+Artwork lives in [bundled atlases](../../apps/frontend/public/avatars).
+[Persona](../../apps/frontend/src/features/profiles/persona-avatars.tsx) and
+[line portrait](../../apps/frontend/src/features/profiles/line-portrait-avatars.tsx)
+metadata select atlas cells or crop coordinates. CSS overlays animate eyes,
+gaze, blinking, and sculpture movement; abstract faces use a separate patch
+atlas.
+[Avatar CSS](../../apps/frontend/src/features/profiles/profile-avatar.css)
+respects reduced-motion preferences. Decorative artwork is hidden from assistive
+technology while controls supply labels and focus states.
+
+When adding an avatar, update the frontend mapping/group, bundled assets, and
+core allowlist together. Keep persisted IDs stable. Rendering fallback does not
+make removing IDs from the backend allowlist safe: old registries still contain
+them. Avatar tests cover rendering, picker behavior, and frontend/backend
+parity.
+
+## Connect, OAuth, synchronization, and MCP
+
+Each profile owns Connect credentials, verified issuer/user/team binding, broker
+mappings, enrollment nonce, device identity, sync keys, cursors, and outbox.
+Lock/switch retain credentials and enrollment rather than invoking Supabase
+sign-out. Local unlock works offline; an inability to verify a migrated binding
+pauses cloud work without blocking local access.
+
+Candidate credentials are verified before binding. Serialized identity
+reservation prevents the same issuer/user ID from attaching to multiple local
+profiles. Binding uses user ID rather than email and survives sign-out. The
+current policy rejects a different account or changed team on a bound profile;
+account/team rebinding and reset are outside this feature.
+
+Supabase keeps its existing login and code-exchange behavior with profile/flow
+scoped backend PKCE storage. One pending login is allowed per native
+installation or web browser owner, bound to its initiating profile and issuer
+with a ten-minute TTL. Switching cancels it; automatic mobile lock can preserve
+it until unlock. The shell retains native callback ownership while financial
+providers unmount, captures the callback before reloading, and resumes exchange
+only for the original flow. Flow correlation rejects late, expired, or replayed
+callbacks. Web redirects resolve through the browser's pending flow and remove
+callback parameters.
+
+Pairing retains existing frontend crypto and backend snapshot orchestration.
+Operations carry the originating scope; ordinary pairing state is discarded on
+lock/switch. No new remote profile identifier or device-sync wire format is
+introduced. Local profile operations never reset a cloud team or copy keys
+between household members.
+
+Native MCP closes on lock and reopens against the active context. Web `/mcp`
+retains independent PAT authorization. `X-WF-Profile-Id` selects a profile;
+omission selects the default. PATs and MCP sessions are validated for that
+profile, and browser locking does not revoke independent PAT authorization.
+
+## Scope and verification boundaries
+
+Biometrics, permanent profile deletion, account/team rebinding, a new web-user
+ownership system, and cloud household enrollment changes are outside this
+feature. Local profiles do not resolve the cloud mismatch between team-wide
+enrollment and same-user pairing; that requires a separate cloud correction.
+
+Regression coverage belongs with the core registry/session tests, native
+lifecycle tests, server profile integration tests, frontend profile/startup
+tests, and
+[isolated profile browser suite](../../e2e/README.md#profile-startup-and-switching).
+Key invariants are independent databases and credentials, persisted cooldowns,
+recovery rotation, stale-scope rejection, pinned delayed writes, callback
+ownership, per-browser grants, and destination appearance/route handling.
+
+Release verification must also exercise real native lock/suspend and cover
+paint, OAuth background/return, external-file permissions, encrypted and
+missing-key recovery, legacy encrypted backups, and lock/switch during
+encryption or restore. Restoring into B must leave A's database, keys, and
+Connect credentials unchanged. Browser and unit tests alone do not establish
+these guarantees. The previously reported intermittent native white window still
+needs a runtime reproduction before its exact cause or resolution can be
+asserted.
