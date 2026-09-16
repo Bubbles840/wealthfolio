@@ -87,8 +87,18 @@ fn portfolio_history_backfill_needed(context: &Arc<ServiceContext>) -> bool {
 
 impl NativeProfiles {
     pub fn new(root: String) -> Result<Self, String> {
-        let legacy = wealthfolio_storage_sqlite::db::get_db_path(&root);
-        let registry = ProfileRegistry::open(root.into(), legacy.into(), shared_secret_store())
+        let (root, legacy) =
+            match crate::data_dir::development_override(std::env::var_os("WF_DATA_DIR"))? {
+                Some(root) => {
+                    let database = root.join("app.db");
+                    (root, database)
+                }
+                None => {
+                    let database = wealthfolio_storage_sqlite::db::get_db_path(&root);
+                    (root.into(), database.into())
+                }
+            };
+        let registry = ProfileRegistry::open(root, legacy, shared_secret_store())
             .map_err(|e| e.to_string())?;
         for id in registry.pending_deletions().map_err(|e| e.to_string())? {
             if registry.finish_delete(id).is_err() {

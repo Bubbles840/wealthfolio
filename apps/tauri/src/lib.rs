@@ -3,6 +3,7 @@
 
 mod commands;
 mod context;
+mod data_dir;
 mod database;
 mod domain_events;
 mod events;
