@@ -5,7 +5,7 @@ use chrono::{Duration, Utc};
 use log::{debug, info};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::AppHandle;
 use uuid::Uuid;
 
 use crate::context::ServiceContext;
@@ -49,7 +49,7 @@ fn sync_source_restore_required_error() -> String {
 pub async fn get_pairing_source_status_internal(
     context: Arc<ServiceContext>,
 ) -> Result<SyncPairingSourceStatusResult, String> {
-    let identity = get_sync_identity_from_store()
+    let identity = get_sync_identity_from_store(&context)
         .ok_or_else(|| "No sync identity configured. Please enable sync first.".to_string())?;
     let device_id = identity
         .device_id
@@ -183,6 +183,7 @@ async fn classify_missing_snapshot_disposition(
 }
 
 fn emit_snapshot_upload_progress(
+    context: &ServiceContext,
     handle: Option<&AppHandle>,
     stage: &str,
     progress: u8,
@@ -194,7 +195,12 @@ fn emit_snapshot_upload_progress(
             progress,
             message: message.to_string(),
         };
-        let _ = handle.emit(DEVICE_SYNC_SNAPSHOT_UPLOAD_PROGRESS_EVENT, payload);
+        let _ = crate::events::emit_for_profile(
+            handle,
+            context,
+            DEVICE_SYNC_SNAPSHOT_UPLOAD_PROGRESS_EVENT,
+            payload,
+        );
     }
 }
 
@@ -250,7 +256,7 @@ pub async fn sync_bootstrap_snapshot_if_needed(
         .connect_service()
         .ensure_device_sync_subscription()
         .await?;
-    let identity = get_sync_identity_from_store()
+    let identity = get_sync_identity_from_store(&context)
         .ok_or_else(|| "No sync identity configured. Please enable sync first.".to_string())?;
     let device_id = identity
         .device_id
@@ -258,13 +264,14 @@ pub async fn sync_bootstrap_snapshot_if_needed(
         .ok_or_else(|| "No device ID configured".to_string())?;
     let token = get_access_token(context).await?;
     // Check in-memory first, then fall back to SQLite (survives restart)
-    let raw_freshness_gate = get_min_snapshot_created_at_from_store(&device_id).or_else(|| {
-        context
-            .app_sync_repository()
-            .get_min_snapshot_created_at(&device_id)
-            .ok()
-            .flatten()
-    });
+    let raw_freshness_gate =
+        get_min_snapshot_created_at_from_store(&context, &device_id).or_else(|| {
+            context
+                .app_sync_repository()
+                .get_min_snapshot_created_at(&device_id)
+                .ok()
+                .flatten()
+        });
     let min_snapshot_created_at = match raw_freshness_gate {
         Some(value) => match wealthfolio_device_sync::normalize_sync_datetime(&value) {
             Ok(normalized) => Some(normalized),
@@ -273,7 +280,7 @@ pub async fn sync_bootstrap_snapshot_if_needed(
                     "[DeviceSync] Dropping invalid min snapshot freshness gate: {}",
                     value
                 );
-                remove_min_snapshot_created_at_from_store(&device_id);
+                remove_min_snapshot_created_at_from_store(&context, &device_id);
                 let _ = context
                     .app_sync_repository()
                     .clear_min_snapshot_created_at(device_id.clone())
@@ -316,7 +323,7 @@ pub async fn sync_bootstrap_snapshot_if_needed(
             Some("WAIT_SNAPSHOT") | Some("BOOTSTRAP_SNAPSHOT")
         );
         if !reconcile_requires_snapshot {
-            clear_min_snapshot_created_at_from_store();
+            clear_min_snapshot_created_at_from_store(&context);
             return Ok(SyncBootstrapResult {
                 status: "skipped".to_string(),
                 message: "Snapshot bootstrap already completed".to_string(),
@@ -368,7 +375,7 @@ pub async fn sync_bootstrap_snapshot_if_needed(
                             .reset_and_mark_bootstrap_complete(device_id, identity.key_version)
                             .await
                             .map_err(|e| e.to_string())?;
-                        clear_min_snapshot_created_at_from_store();
+                        clear_min_snapshot_created_at_from_store(&context);
                         return Ok(SyncBootstrapResult {
                             status: "skipped".to_string(),
                             message,
@@ -415,7 +422,7 @@ pub async fn sync_bootstrap_snapshot_if_needed(
                         .reset_and_mark_bootstrap_complete(device_id, identity.key_version)
                         .await
                         .map_err(|e| e.to_string())?;
-                    clear_min_snapshot_created_at_from_store();
+                    clear_min_snapshot_created_at_from_store(&context);
                     return Ok(SyncBootstrapResult {
                         status: "skipped".to_string(),
                         message,
@@ -529,14 +536,9 @@ pub async fn sync_bootstrap_snapshot_if_needed(
     let sqlite_image = decode_snapshot_sqlite_payload(blob, &identity)?;
     // App-private storage, not the shared system temp directory: the snapshot
     // image is a plaintext copy of synced financial rows.
-    let scratch_dir = handle
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("Failed to resolve app data dir: {e}"))
-        .and_then(|dir| {
-            wealthfolio_storage_sqlite::db::scratch_dir(&dir.to_string_lossy())
-                .map_err(|e| format!("Failed to prepare the snapshot scratch directory: {e}"))
-        })?;
+    let scratch_dir =
+        wealthfolio_storage_sqlite::db::profile_scratch_dir(&context.data_root.to_string_lossy())
+            .map_err(|e| format!("Failed to prepare snapshot scratch directory: {e}"))?;
     let temp_snapshot_path = scratch_dir.join(format!("wf_snapshot_{}.db", Uuid::new_v4()));
     std::fs::write(&temp_snapshot_path, sqlite_image)
         .map_err(|e| format!("Failed to persist snapshot image: {}", e))?;
@@ -570,10 +572,10 @@ pub async fn sync_bootstrap_snapshot_if_needed(
         .account_ids(None)
         .market_sync_mode(MarketSyncMode::Incremental { asset_ids: None })
         .build();
-    emit_portfolio_trigger_recalculate(&handle, payload);
+    emit_portfolio_trigger_recalculate(&handle, payload, &context);
 
     // Clear freshness gate from both in-memory and SQLite
-    clear_min_snapshot_created_at_from_store();
+    clear_min_snapshot_created_at_from_store(&context);
     if let Err(err) = sync_repo.clear_min_snapshot_created_at(device_id).await {
         log::warn!(
             "[DeviceSync] Failed to clear freshness gate from SQLite: {}",
@@ -601,9 +603,9 @@ pub async fn generate_snapshot_now_internal(
         .device_sync_runtime()
         .snapshot_upload_cancelled
         .store(false, Ordering::Relaxed);
-    emit_snapshot_upload_progress(handle, "start", 5, "Preparing snapshot export");
+    emit_snapshot_upload_progress(&context, handle, "start", 5, "Preparing snapshot export");
 
-    let identity = get_sync_identity_from_store()
+    let identity = get_sync_identity_from_store(&context)
         .ok_or_else(|| "No sync identity configured. Please enable sync first.".to_string())?;
     let device_id = identity
         .device_id
@@ -633,7 +635,13 @@ pub async fn generate_snapshot_now_internal(
         .snapshot_upload_cancelled
         .load(Ordering::Relaxed)
     {
-        emit_snapshot_upload_progress(handle, "cancelled", 0, "Snapshot upload cancelled");
+        emit_snapshot_upload_progress(
+            &context,
+            handle,
+            "cancelled",
+            0,
+            "Snapshot upload cancelled",
+        );
         return Ok(snapshot_upload_cancelled_result(
             "Snapshot upload cancelled before export",
         ));
@@ -664,6 +672,7 @@ pub async fn generate_snapshot_now_internal(
                     latest_snapshot.snapshot_id, latest_snapshot.oplog_seq, cursor
                 );
                 emit_snapshot_upload_progress(
+                    &context,
                     handle,
                     "completed",
                     100,
@@ -694,13 +703,19 @@ pub async fn generate_snapshot_now_internal(
         .export_snapshot_sqlite_image(sync_tables)
         .await
         .map_err(|e| format!("Failed to export snapshot SQLite image: {}", e))?;
-    emit_snapshot_upload_progress(handle, "exported", 35, "Snapshot exported");
+    emit_snapshot_upload_progress(&context, handle, "exported", 35, "Snapshot exported");
     if context
         .device_sync_runtime()
         .snapshot_upload_cancelled
         .load(Ordering::Relaxed)
     {
-        emit_snapshot_upload_progress(handle, "cancelled", 0, "Snapshot upload cancelled");
+        emit_snapshot_upload_progress(
+            &context,
+            handle,
+            "cancelled",
+            0,
+            "Snapshot upload cancelled",
+        );
         return Ok(snapshot_upload_cancelled_result(
             "Snapshot upload cancelled after export",
         ));
@@ -745,7 +760,7 @@ pub async fn generate_snapshot_now_internal(
         .strip_prefix("sha256:")
         .unwrap_or(upload_headers.checksum.as_str());
     let checksum_prefix = &checksum_prefix[..checksum_prefix.len().min(12)];
-    emit_snapshot_upload_progress(handle, "uploading", 70, "Uploading snapshot");
+    emit_snapshot_upload_progress(&context, handle, "uploading", 70, "Uploading snapshot");
     info!(
         "[DeviceSync] Snapshot upload start device_id={} size_bytes={} key_version={} checksum=sha256:{}",
         device_id,
@@ -770,6 +785,7 @@ pub async fn generate_snapshot_now_internal(
             let message = err.to_string();
             if message.to_ascii_lowercase().contains("cancelled") {
                 emit_snapshot_upload_progress(
+                    &context,
                     handle,
                     "cancelled",
                     0,
@@ -800,6 +816,7 @@ pub async fn generate_snapshot_now_internal(
                             snapshot.snapshot_id, snapshot.oplog_seq, cursor
                         );
                         emit_snapshot_upload_progress(
+                            &context,
                             handle,
                             "complete",
                             100,
@@ -822,7 +839,13 @@ pub async fn generate_snapshot_now_internal(
         "[DeviceSync] Snapshot upload success snapshot_id={} oplog_seq={} r2_key={}",
         response.snapshot_id, response.oplog_seq, response.r2_key
     );
-    emit_snapshot_upload_progress(handle, "complete", 100, "Snapshot upload complete");
+    emit_snapshot_upload_progress(
+        &context,
+        handle,
+        "complete",
+        100,
+        "Snapshot upload complete",
+    );
 
     Ok(SyncSnapshotUploadResult {
         status: "uploaded".to_string(),

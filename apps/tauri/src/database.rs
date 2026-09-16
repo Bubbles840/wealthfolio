@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 use log::{error, info, warn};
 use tauri::async_runtime::JoinHandle;
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 use wealthfolio_ai::ProviderApiError;
 use wealthfolio_core::errors::{DatabaseError, Error, Result as CoreResult};
 use wealthfolio_core::events::DomainEvent;
@@ -32,10 +32,11 @@ use wealthfolio_storage_sqlite::db::{
 };
 
 use crate::context::{initialize_context, ServiceContext};
+#[cfg(test)]
 use crate::secret_store::shared_secret_store;
 
 /// Keychain entry holding this device's database key.
-const DATABASE_KEY_SECRET: &str = "database_encryption_key";
+use wealthfolio_core::profiles::{ProfilePaths, DATABASE_KEY_SECRET};
 
 /// How long teardown waits for in-flight commands to release the context before
 /// giving up. Long enough for an ordinary query, short enough that a stuck one
@@ -209,6 +210,11 @@ pub struct DatabaseStartupStatus {
 }
 
 pub struct DatabaseRuntime {
+    pub profile_registry: Option<Arc<wealthfolio_core::profiles::ProfileRegistry>>,
+    pub profile_id: uuid::Uuid,
+    pub secret_store: Arc<dyn SecretStore>,
+    db_path: String,
+    suspended: AtomicBool,
     startup_error: Mutex<Option<String>>,
     pub backup_imports: db::imports::PendingImports,
     pub backup_export_slot: Arc<tokio::sync::Semaphore>,
@@ -226,19 +232,94 @@ pub struct DatabaseRuntime {
 }
 
 impl DatabaseRuntime {
+    #[cfg(test)]
     pub fn new(app_data_dir: String) -> Self {
+        let database = db::get_db_path(&app_data_dir).into();
+        Self::for_profile(
+            uuid::Uuid::nil(),
+            ProfilePaths {
+                root: app_data_dir.into(),
+                database,
+            },
+            shared_secret_store(),
+        )
+    }
+
+    pub fn for_profile(
+        profile_id: uuid::Uuid,
+        paths: ProfilePaths,
+        secret_store: Arc<dyn SecretStore>,
+    ) -> Self {
         Self {
+            profile_registry: None,
+            profile_id,
+            db_path: paths.database.to_string_lossy().into_owned(),
+            suspended: AtomicBool::new(false),
+            secret_store: secret_store.clone(),
             startup_error: Mutex::new(None),
             backup_imports: db::imports::PendingImports::default(),
             backup_export_slot: Arc::new(tokio::sync::Semaphore::new(1)),
-            app_data_dir,
-            key_provider: Arc::new(KeychainKeyProvider::new(shared_secret_store())),
+            app_data_dir: paths.root.to_string_lossy().into_owned(),
+            key_provider: Arc::new(KeychainKeyProvider::new(secret_store)),
             live: Mutex::new(None),
             maintenance: AtomicBool::new(false),
             file_jobs: Arc::new(()),
             retired_contexts: Mutex::new(Vec::new()),
             owner: Mutex::new(None),
         }
+    }
+
+    pub fn database_path(&self) -> &str {
+        &self.db_path
+    }
+
+    fn check_available(&self) -> std::result::Result<(), DatabaseUnavailable> {
+        self.check_state()?;
+        if self.suspended.load(Ordering::SeqCst) {
+            return Err(DatabaseUnavailable::NotInitialized);
+        }
+        Ok(())
+    }
+
+    pub fn generation(&self) -> Option<uuid::Uuid> {
+        self.startup_status().generation
+    }
+
+    pub fn suspend(&self) {
+        self.suspended.store(true, Ordering::SeqCst);
+        if let Ok(live) = self.live.lock() {
+            if let Some(live) = live.as_ref() {
+                live.context.active.store(false, Ordering::SeqCst);
+            }
+        }
+    }
+
+    pub async fn shutdown(&self, handle: &AppHandle) -> std::result::Result<(), String> {
+        self.suspended.store(true, Ordering::SeqCst);
+        if let Some(live) = self.lock(&self.live)?.as_ref() {
+            live.context.active.store(false, Ordering::SeqCst);
+        }
+        let deadline = Instant::now() + OWNERSHIP_WAIT;
+        while self.maintenance.load(Ordering::SeqCst) && Instant::now() < deadline {
+            tokio::time::sleep(OWNERSHIP_POLL).await;
+        }
+        if self.maintenance.load(Ordering::SeqCst) {
+            return Err("Database maintenance is still completing. The profile is locked.".into());
+        }
+        self.teardown(handle).await?;
+        // A previous teardown may have retired its live context. Repeated lock
+        // attempts must still wait for that context's jobs before switching.
+        while self.has_outstanding_jobs()? && Instant::now() < deadline {
+            tokio::time::sleep(OWNERSHIP_POLL).await;
+        }
+        if self.has_outstanding_jobs()? {
+            return Err(
+                "The profile is locked; background database work is still completing.".into(),
+            );
+        }
+        self.wait_for_pool_release(deadline).await?;
+        *self.lock(&self.owner)? = None;
+        Ok(())
     }
 
     pub fn app_data_dir(&self) -> &str {
@@ -294,7 +375,7 @@ impl DatabaseRuntime {
             && error.is_some()
             && self.lock(&self.owner)?.is_some()
             && !self.maintenance.load(Ordering::SeqCst);
-        let path = db::get_db_path(&self.app_data_dir);
+        let path = self.db_path.clone();
         let recovery_encrypted = can_recover.then(|| {
             db::recovery::requires_encryption(
                 std::path::Path::new(&path),
@@ -314,6 +395,7 @@ impl DatabaseRuntime {
     /// Import inspection can run without an open database after startup failed,
     /// but still participates in the runtime's file-job admission proof.
     pub fn import_lease(&self) -> std::result::Result<Arc<()>, String> {
+        self.check_available()?;
         // Share the live-state lock with teardown/recovery admission so a lease
         // cannot appear after their final outstanding-job check.
         let live = self.lock(&self.live)?;
@@ -329,6 +411,7 @@ impl DatabaseRuntime {
     }
 
     pub fn retained_key(&self) -> std::result::Result<Option<Arc<DbEncryptionKey>>, String> {
+        self.check_available()?;
         if let Some(key) = self
             .current_access()?
             .and_then(|access| access.key().cloned())
@@ -353,7 +436,7 @@ impl DatabaseRuntime {
     /// context alive for the duration of the call, which is why maintenance
     /// aborts rather than proceeding while a command is in flight.
     pub fn context(&self) -> std::result::Result<Arc<ServiceContext>, DatabaseUnavailable> {
-        self.check_state()?;
+        self.check_available()?;
         if self.maintenance.load(Ordering::SeqCst) {
             return Err(DatabaseUnavailable::Maintenance);
         }
@@ -376,7 +459,7 @@ impl DatabaseRuntime {
     /// the file is being replaced would pass its own open, then keep reading the
     /// outgoing inode after the rename and silently save stale data.
     pub fn access(&self) -> std::result::Result<DatabaseFileAccess, DatabaseUnavailable> {
-        self.check_state()?;
+        self.check_available()?;
         if self.maintenance.load(Ordering::SeqCst) {
             return Err(DatabaseUnavailable::Maintenance);
         }
@@ -430,7 +513,9 @@ impl DatabaseRuntime {
         purge_staging: bool,
     ) -> std::result::Result<Arc<ServiceContext>, String> {
         self.check_state()?;
-        let db_path = db::get_db_path(&self.app_data_dir);
+        self.check_available()?;
+        let db_path = self.db_path.clone();
+        std::fs::create_dir_all(&self.app_data_dir).map_err(|e| e.to_string())?;
         {
             let mut owner = self.lock(&self.owner)?;
             if owner.is_none() {
@@ -468,11 +553,14 @@ impl DatabaseRuntime {
 
     /// Retry startup without removing the immutable previews staged since the
     /// first attempt. App ownership and file-job admission still apply.
-    pub async fn retry_startup(&self, handle: &AppHandle) -> std::result::Result<(), String> {
+    pub async fn retry_startup(
+        self: &Arc<Self>,
+        handle: &AppHandle,
+    ) -> std::result::Result<(), String> {
         let handle = handle.clone();
+        let runtime = self.clone();
         tauri::async_runtime::spawn(async move {
-            let runtime = handle.state::<DatabaseRuntime>();
-            runtime.check_state()?;
+            runtime.check_available()?;
             if runtime
                 .maintenance
                 .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -510,15 +598,26 @@ impl DatabaseRuntime {
             .lock(&self.owner)?
             .clone()
             .ok_or_else(|| "Database ownership is not available.".to_string())?;
-        let init = initialize_context(&self.app_data_dir, &access, owner)
-            .await
-            .map_err(|e| e.to_string())?;
+        let init = initialize_context(
+            &self.app_data_dir,
+            &access,
+            owner,
+            self.profile_id,
+            self.secret_store.clone(),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
 
         let context = Arc::new(init.context);
+        if let Some(registry) = &self.profile_registry {
+            context
+                .connect_service()
+                .set_profile_binding(registry.clone(), self.profile_id);
+        }
         match context.settings_service().requires_cloud_reconnect() {
             Ok(true) => {
                 if let Err(error) = wealthfolio_connect::clear_restored_installation_credentials(
-                    shared_secret_store().as_ref(),
+                    self.secret_store.as_ref(),
                 ) {
                     warn!("Cloud reconnection remains required: {error}");
                 }
@@ -530,6 +629,7 @@ impl DatabaseRuntime {
         // stop its writer before returning; never leave an uninstalled writer running.
         let error = {
             match self.lock(&self.live) {
+                Ok(_) if self.suspended.load(Ordering::SeqCst) => "PROFILE_LOCKED".to_string(),
                 Ok(mut live) => {
                     let mut workers = start_workers(
                         handle,
@@ -551,7 +651,7 @@ impl DatabaseRuntime {
                     });
                     return Ok(context);
                 }
-                Err(error) => error,
+                Err(error) => error.to_string(),
             }
         };
         init.writer.shutdown().await;
@@ -572,7 +672,7 @@ impl DatabaseRuntime {
     /// state on every open, so a marker that disagrees with the file corrects
     /// itself rather than compounding.
     fn record_encryption_state(&self, access: &DbAccess) {
-        let marker = encryption_marker(&db::get_db_path(&self.app_data_dir));
+        let marker = encryption_marker(&self.db_path.clone());
         let result = if access.is_encrypted() {
             std::fs::write(&marker, b"")
         } else {
@@ -598,17 +698,17 @@ impl DatabaseRuntime {
     /// rollback that leaves no live context would strand the app with no
     /// database at all, which is worse than the failure it recovered from.
     pub async fn run_maintenance(
-        &self,
+        self: &Arc<Self>,
         handle: &AppHandle,
         prepare: impl FnOnce(&Self) -> std::result::Result<MaintenanceRequest, String> + Send + 'static,
     ) -> std::result::Result<MaintenanceOutcome, String> {
         // The caller may close its window or cancel IPC while a blocking copy
         // runs. Keep the gate, teardown and rebuild owned by the app task.
         let handle = handle.clone();
-        tauri::async_runtime::spawn(async move {
-            let runtime = handle.state::<DatabaseRuntime>();
-            runtime.run_owned_maintenance(&handle, prepare).await
-        })
+        let runtime = self.clone();
+        tauri::async_runtime::spawn(
+            async move { runtime.run_owned_maintenance(&handle, prepare).await },
+        )
         .await
         .map_err(|error| format!("Database maintenance task failed: {error}"))?
     }
@@ -618,6 +718,7 @@ impl DatabaseRuntime {
         handle: &AppHandle,
         prepare: impl FnOnce(&Self) -> std::result::Result<MaintenanceRequest, String>,
     ) -> std::result::Result<MaintenanceOutcome, String> {
+        self.check_available()?;
         let (_gate, request) = self.prepare_maintenance(prepare)?;
         let result = self.run_maintenance_inner(handle, request).await;
         self.record_maintenance_error(result.as_ref().err().map(String::as_str))?;
@@ -696,6 +797,10 @@ impl DatabaseRuntime {
             Ok(outcome) => outcome.access.clone(),
             Err(_) => access.clone(),
         };
+        if self.suspended.load(Ordering::SeqCst) {
+            self.record_encryption_state(&next_access);
+            return outcome;
+        }
         if let Err(rebuild_error) = self.install(handle, next_access.clone()).await {
             error!("Failed to rebuild the database runtime: {}", rebuild_error);
             if let Ok(completed) = &outcome {
@@ -774,10 +879,13 @@ impl DatabaseRuntime {
         // Startup and outbox workers can start the engine, so stop and join
         // them first. Then wait for the engine to release its own services.
         #[cfg(feature = "device-sync")]
-        context
-            .device_sync_runtime()
-            .ensure_background_stopped()
-            .await;
+        {
+            let _guard = context.sync_lifecycle.lock().await;
+            context
+                .device_sync_runtime()
+                .ensure_background_stopped()
+                .await;
+        }
 
         // The MCP server holds service clones — and therefore pool clones — that
         // do not travel through the context, so it must be stopped explicitly.
@@ -850,13 +958,13 @@ impl DatabaseRuntime {
     /// The validated candidate and its quota remain owned by the restore task,
     /// even if the confirmation IPC caller disappears.
     pub async fn restore_validated_import(
-        &self,
+        self: &Arc<Self>,
         handle: &AppHandle,
         id: uuid::Uuid,
     ) -> std::result::Result<(), String> {
         let handle = handle.clone();
+        let runtime = self.clone();
         tauri::async_runtime::spawn(async move {
-            let runtime = handle.state::<DatabaseRuntime>();
             let candidate = runtime
                 .backup_imports
                 .take(id, "native")
@@ -877,13 +985,14 @@ impl DatabaseRuntime {
     }
 
     pub async fn recover_validated_import(
-        &self,
+        self: &Arc<Self>,
         handle: &AppHandle,
         id: uuid::Uuid,
     ) -> std::result::Result<(), String> {
         let handle = handle.clone();
+        let runtime = self.clone();
         tauri::async_runtime::spawn(async move {
-            let runtime = handle.state::<DatabaseRuntime>();
+            runtime.check_available()?;
             if !runtime.startup_status().can_recover {
                 return Err("Recovery is only available after database startup fails.".into());
             }
@@ -898,7 +1007,7 @@ impl DatabaseRuntime {
                 }
             }
             let candidate = runtime.backup_imports.take(id, "native").map_err(|e| e.to_string())?;
-            let path = db::get_db_path(runtime.app_data_dir());
+            let path = runtime.db_path.clone();
             let encrypted = db::recovery::requires_encryption(std::path::Path::new(&path), encryption_marker(&path).exists());
             let key = if encrypted {
                 Some(Arc::new(runtime.key_provider.create().map_err(|e| e.to_string())?))
@@ -930,7 +1039,7 @@ impl DatabaseRuntime {
     /// fails the key is kept: the database is still plaintext, detection falls
     /// through to the unkeyed open, and the operation is safe to retry.
     pub async fn enable_encryption(
-        &self,
+        self: &Arc<Self>,
         handle: &AppHandle,
     ) -> std::result::Result<MaintenanceOutcome, String> {
         self.run_maintenance(handle, |runtime| {
@@ -955,7 +1064,7 @@ impl DatabaseRuntime {
     /// so encrypted backups taken before this point remain openable and a later
     /// re-enable reuses the same key.
     pub async fn disable_encryption(
-        &self,
+        self: &Arc<Self>,
         handle: &AppHandle,
     ) -> std::result::Result<MaintenanceOutcome, String> {
         let access = self
@@ -1113,7 +1222,7 @@ mod tests {
     async fn cancelled_caller_cannot_hide_a_blocking_pool_user_from_maintenance() {
         let directory = tempfile::tempdir().unwrap();
         let runtime = DatabaseRuntime::new(directory.path().to_string_lossy().into_owned());
-        let path = db::get_db_path(runtime.app_data_dir());
+        let path = runtime.db_path.clone();
         let owner = Arc::new(DatabaseOwner::acquire(&path).unwrap());
         let pool = DbAccess::plaintext(&path)
             .create_pool_with_owner(Arc::clone(&owner))
@@ -1154,7 +1263,7 @@ mod tests {
         assert!(runtime.import_lease().is_err());
         *runtime.startup_error.lock().unwrap() = Some("missing device key".into());
         assert!(!runtime.startup_status().can_recover);
-        let path = db::get_db_path(runtime.app_data_dir());
+        let path = runtime.db_path.clone();
         *runtime.owner.lock().unwrap() = Some(Arc::new(DatabaseOwner::acquire(&path).unwrap()));
         assert!(runtime.startup_status().can_recover);
         assert_eq!(runtime.startup_status().recovery_encrypted, Some(false));
@@ -1173,7 +1282,7 @@ mod tests {
     fn failed_live_maintenance_exposes_recovery_after_teardown() {
         let directory = tempfile::tempdir().unwrap();
         let runtime = DatabaseRuntime::new(directory.path().to_string_lossy().into_owned());
-        let path = db::get_db_path(runtime.app_data_dir());
+        let path = runtime.db_path.clone();
         *runtime.owner.lock().unwrap() = Some(Arc::new(DatabaseOwner::acquire(&path).unwrap()));
         runtime.maintenance.store(true, Ordering::SeqCst);
         runtime

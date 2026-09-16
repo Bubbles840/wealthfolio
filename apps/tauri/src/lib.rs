@@ -8,6 +8,8 @@ mod domain_events;
 mod events;
 mod listeners;
 mod mcp;
+mod profile_lifecycle;
+mod profiles;
 mod scheduler;
 mod secret_store;
 mod services;
@@ -25,62 +27,8 @@ use log::error;
 use log::warn;
 use tauri::{AppHandle, Emitter, Manager};
 
-use events::{emit_app_ready, emit_portfolio_trigger_recalculate, PortfolioRequestPayload};
+use events::emit_app_ready;
 use tauri_plugin_deep_link::DeepLinkExt;
-
-fn portfolio_history_backfill_needed(context: &Arc<context::ServiceContext>) -> bool {
-    let accounts = match context.account_service().get_non_archived_accounts() {
-        Ok(accounts) => accounts,
-        Err(err) => {
-            error!("Failed to inspect accounts for valuation backfill: {}", err);
-            return false;
-        }
-    };
-    let account_ids: Vec<String> = accounts.into_iter().map(|account| account.id).collect();
-    if account_ids.is_empty() {
-        return false;
-    }
-
-    let latest = match context
-        .valuation_service()
-        .get_latest_valuations(&account_ids)
-    {
-        Ok(latest) => latest,
-        Err(err) => {
-            error!("Failed to inspect valuation history for backfill: {}", err);
-            return false;
-        }
-    };
-    let accounts_with_valuations: std::collections::HashSet<_> = latest
-        .into_iter()
-        .map(|valuation| valuation.account_id)
-        .collect();
-    let missing_ids: Vec<String> = account_ids
-        .into_iter()
-        .filter(|account_id| !accounts_with_valuations.contains(account_id))
-        .collect();
-    if missing_ids.is_empty() {
-        return false;
-    }
-
-    if matches!(
-        context
-            .activity_service()
-            .get_first_activity_date(Some(&missing_ids)),
-        Ok(Some(_))
-    ) {
-        return true;
-    }
-
-    missing_ids.iter().any(|account_id| {
-        matches!(
-            context
-                .snapshot_service()
-                .get_latest_holdings_snapshot(account_id),
-            Ok(Some(_))
-        )
-    })
-}
 
 #[cfg(feature = "device-sync")]
 fn start_sync_outbox_wake_worker(
@@ -153,25 +101,20 @@ mod desktop {
         // owns the background workers and retains their handles.
         tauri::async_runtime::spawn(async move {
             let context = handle
-                .state::<database::DatabaseRuntime>()
-                .initialize(&handle)
+                .state::<profiles::NativeProfiles>()
+                .startup(&handle)
                 .await;
             let menu_bar_visible = context
                 .as_ref()
                 .ok()
+                .and_then(|context| context.as_ref())
                 .and_then(|context| context.settings_service().get_settings().ok())
                 .map(|settings| settings.menu_bar_visible)
                 .unwrap_or(true);
-            let needs_backfill = match context {
-                Ok(context) => portfolio_history_backfill_needed(&context),
-                Err(error) => {
-                    // Keep the window open so a missing encryption key or failed
-                    // migration can be shown by the recovery gate. The runtime
-                    // retains the startup error and keeps database commands gated.
-                    error!("Failed to open the database: {}", error);
-                    false
-                }
-            };
+            if let Err(error) = &context {
+                // Keep the window open so the recovery gate can show the error.
+                error!("Failed to open the database: {}", error);
+            }
             let ready_handle = handle.clone();
             // Install the native menu and its handlers once, on the main thread,
             // after initialization has resolved the menu visibility setting.
@@ -181,12 +124,6 @@ mod desktop {
                 // gate reads the runtime's stored status. On success, frontend
                 // startup hooks own the initial portfolio update and update check.
                 emit_app_ready(&ready_handle);
-                if needs_backfill {
-                    emit_portfolio_trigger_recalculate(
-                        &ready_handle,
-                        PortfolioRequestPayload::builder().build(),
-                    );
-                }
             }) {
                 error!("Failed to finish desktop setup: {}", error);
                 emit_app_ready(&handle);
@@ -224,20 +161,9 @@ mod mobile {
     /// Performs async setup on mobile without blocking the main thread.
     pub fn setup(handle: AppHandle) {
         tauri::async_runtime::spawn(async move {
-            let runtime = handle.state::<database::DatabaseRuntime>();
-            match runtime.initialize(&handle).await {
-                Ok(context) => {
-                    // Notify frontend that app is ready
-                    // The frontend will trigger the initial portfolio update after it's mounted
-                    emit_app_ready(&handle);
-
-                    if portfolio_history_backfill_needed(&context) {
-                        emit_portfolio_trigger_recalculate(
-                            &handle,
-                            PortfolioRequestPayload::builder().build(),
-                        );
-                    }
-                }
+            let runtime = handle.state::<profiles::NativeProfiles>();
+            match runtime.startup(&handle).await {
+                Ok(_) => emit_app_ready(&handle),
                 Err(e) => {
                     error!("Failed to initialize context on mobile: {}", e);
                     // Emit ready so UI can show error state
@@ -312,7 +238,7 @@ pub fn run() {
             // The database runtime is managed before anything can reach it, and
             // stays managed for the life of the process: maintenance takes its
             // *contents*, never the state entry itself.
-            handle.manage(database::DatabaseRuntime::new(get_app_data_dir(&handle)?));
+            handle.manage(profiles::NativeProfiles::new(get_app_data_dir(&handle)?)?);
 
             // Platform-specific plugin initialization
             #[cfg(desktop)]
@@ -322,7 +248,8 @@ pub fn run() {
             mobile::init_plugins(&handle);
 
             // Setup event listeners (platform-agnostic)
-            listeners::setup_event_listeners(handle.clone());
+            profiles::start_lock_monitor(handle.clone());
+            profile_lifecycle::install(&handle);
 
             // Setup deep link handler
             let deep_link_handle = handle.clone();
@@ -330,6 +257,13 @@ pub fn run() {
                 let urls = event.urls();
                 log::debug!("Deep link received (count: {})", urls.len());
                 for url in urls {
+                    if url.as_str().starts_with("wealthfolio://auth/") {
+                        let _ = deep_link_handle
+                            .state::<profiles::NativeProfiles>()
+                            .registry
+                            .auth_flows
+                            .capture_native(profiles::NATIVE_OWNER, url.as_str());
+                    }
                     let _ = deep_link_handle.emit("deep-link-received", url.to_string());
                 }
             });
@@ -344,6 +278,19 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            profiles::get_profile_state,
+            profile_lifecycle::profile_cover_ready,
+            profile_lifecycle::profile_cover_state,
+            profiles::profile_auth_storage,
+            profiles::capture_profile_auth_callback,
+            profiles::create_profile,
+            profiles::delete_profile,
+            profiles::unlock_profile,
+            profiles::lock_profile,
+            profiles::profile_activity,
+            profiles::update_profile,
+            profiles::set_profile_password,
+            profiles::recover_profile_password,
             // Account commands
             commands::account::get_accounts,
             commands::account::create_account,
@@ -485,6 +432,7 @@ pub fn run() {
             commands::utilities::export_data_file,
             commands::utilities::open_external_url,
             commands::utilities::get_app_info,
+            commands::utilities::profile_transfer_file,
             commands::utilities::check_for_updates,
             commands::utilities::install_app_update,
             commands::utilities::backup_database,
@@ -566,6 +514,8 @@ pub fn run() {
             // Secrets commands
             commands::secrets::set_secret,
             commands::secrets::get_secret,
+            commands::secrets::get_profile_sync_identity,
+            commands::secrets::update_profile_sync_identity,
             commands::secrets::delete_secret,
             commands::secrets::set_addon_secret,
             commands::secrets::get_addon_secret,
@@ -820,7 +770,7 @@ pub fn run() {
 
                 #[cfg(feature = "device-sync")]
                 if let Some(context) = _handle
-                    .try_state::<database::DatabaseRuntime>()
+                    .try_state::<profiles::NativeProfiles>()
                     .and_then(|runtime| runtime.try_context())
                 {
                     tauri::async_runtime::block_on(async move {

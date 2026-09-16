@@ -250,7 +250,7 @@ impl CredentialStore for TauriEnginePorts {
     }
 
     fn get_sync_identity(&self) -> Option<SyncIdentity> {
-        get_sync_identity_from_store().map(|identity| SyncIdentity {
+        get_sync_identity_from_store(&self.context).map(|identity| SyncIdentity {
             device_id: identity.device_id,
             root_key: identity.root_key,
             key_version: identity.key_version,
@@ -334,11 +334,15 @@ pub(super) async fn run_sync_cycle(
 }
 
 pub async fn ensure_background_engine_started(context: Arc<ServiceContext>) -> Result<(), String> {
+    let _guard = context.sync_lifecycle.lock().await;
+    if !context.is_active() {
+        return Err("PROFILE_LOCKED".into());
+    }
     let has_session = context.connect_service().is_session_configured()?;
     if !has_session {
         return Ok(());
     }
-    let Some(identity) = get_sync_identity_from_store() else {
+    let Some(identity) = get_sync_identity_from_store(&context) else {
         return Ok(());
     };
     if !sync_identity_can_run_background(&identity) {
@@ -346,7 +350,7 @@ pub async fn ensure_background_engine_started(context: Arc<ServiceContext>) -> R
     }
 
     let runtime = context.device_sync_runtime();
-    let ports = Arc::new(TauriEnginePorts::new(context));
+    let ports = Arc::new(TauriEnginePorts::new(context.clone()));
     runtime.ensure_background_started(ports).await;
     Ok(())
 }

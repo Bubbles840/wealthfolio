@@ -61,6 +61,9 @@ fn token_lifecycle_config() -> Option<TokenLifecycleConfig> {
 /// This service handles keyring token retrieval and provides
 /// convenient methods for common cloud API operations.
 pub struct ConnectService {
+    binding:
+        std::sync::RwLock<Option<(Arc<wealthfolio_core::profiles::ProfileRegistry>, uuid::Uuid)>>,
+    verified_token: tokio::sync::Mutex<Option<String>>,
     secret_store: Arc<dyn SecretStore>,
     settings: Arc<dyn SettingsServiceTrait>,
     token_lifecycle: Arc<TokenLifecycleState>,
@@ -73,10 +76,45 @@ impl ConnectService {
         settings: Arc<dyn SettingsServiceTrait>,
     ) -> Self {
         Self {
+            binding: std::sync::RwLock::new(None),
+            verified_token: tokio::sync::Mutex::new(None),
             secret_store,
             settings,
             token_lifecycle: Arc::new(TokenLifecycleState::new()),
         }
+    }
+
+    pub fn set_profile_binding(
+        &self,
+        registry: Arc<wealthfolio_core::profiles::ProfileRegistry>,
+        id: uuid::Uuid,
+    ) {
+        *self.binding.write().expect("binding initialization") = Some((registry, id));
+    }
+    async fn verify_binding(&self, token: &str) -> Result<(), String> {
+        let mut verified = self.verified_token.lock().await;
+        if verified.as_deref() == Some(token) {
+            return Ok(());
+        }
+        let binding_owner = self
+            .binding
+            .read()
+            .map_err(|_| "Profile binding unavailable")?
+            .clone();
+        if let Some((registry, id)) = binding_owner {
+            let config = token_lifecycle_config().ok_or("Connect auth is unavailable")?;
+            let binding = wealthfolio_connect::token_lifecycle::verified_profile_binding(
+                token,
+                &config,
+                &cloud_api_base_url().ok_or("Connect unavailable")?,
+            )
+            .await?;
+            registry
+                .bind_connect(id, binding)
+                .map_err(|e| e.to_string())?;
+        }
+        *verified = Some(token.to_string());
+        Ok(())
     }
 
     /// Returns a valid access token, refreshing it through Supabase when needed.
@@ -93,13 +131,15 @@ impl ConnectService {
             return Err("Reconnect Wealthfolio Connect after restoring this backup.".into());
         }
         let config = token_lifecycle_config();
-        ensure_valid_access_token(
+        let token = ensure_valid_access_token(
             self.secret_store.as_ref(),
             self.token_lifecycle.as_ref(),
             config.as_ref(),
         )
         .await
-        .map_err(|err| err.to_string())
+        .map_err(|err| err.to_string())?;
+        self.verify_binding(&token).await?;
+        Ok(token)
     }
 
     pub fn is_session_configured(&self) -> Result<bool, String> {
@@ -116,8 +156,28 @@ impl ConnectService {
     }
 
     pub async fn store_session(&self, token: &str) -> Result<(), String> {
+        let binding_owner = self
+            .binding
+            .read()
+            .map_err(|_| "Profile binding unavailable")?
+            .clone();
+        let mut token = token.to_string();
+        if let Some((registry, id)) = binding_owner {
+            let config = token_lifecycle_config().ok_or("Connect auth unavailable")?;
+            let (candidate, binding) =
+                wealthfolio_connect::token_lifecycle::validate_profile_login(
+                    &token,
+                    &config,
+                    &cloud_api_base_url().ok_or("Connect unavailable")?,
+                )
+                .await?;
+            registry
+                .bind_connect(id, binding)
+                .map_err(|e| e.to_string())?;
+            token = candidate;
+        }
         self.token_lifecycle
-            .store_session_after_restore(self.secret_store.as_ref(), self.settings.as_ref(), token)
+            .store_session_after_restore(self.secret_store.as_ref(), self.settings.as_ref(), &token)
             .await
             .map_err(|err| err.to_string())
     }

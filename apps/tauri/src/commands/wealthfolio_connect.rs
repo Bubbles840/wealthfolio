@@ -8,13 +8,12 @@ use crate::commands::device_sync::{
     get_sync_identity_from_store, sync_identity_can_run_background,
 };
 use crate::context::ServiceContext;
-use crate::database::DatabaseRuntime;
-use crate::secret_store::KeyringSecretStore;
+use crate::profiles::ProfileAccess;
 use log::{debug, error};
 use serde::Serialize;
 use std::future::Future;
 use std::sync::Arc;
-use tauri::{AppHandle, State};
+use tauri::AppHandle;
 #[cfg(feature = "connect-sync")]
 use wealthfolio_connect::{
     prepare_post_login_broker_bootstrap, BrokerApiClient, PostLoginBrokerBootstrapDecision,
@@ -23,7 +22,6 @@ use wealthfolio_connect::{
     PostLoginBootstrapReason, PostLoginBootstrapResult, PostLoginBootstrapSyncResult,
     CLOUD_REFRESH_TOKEN_KEY,
 };
-use wealthfolio_core::secrets::SecretStore;
 #[cfg(feature = "device-sync")]
 use wealthfolio_device_sync::SyncState;
 
@@ -76,7 +74,7 @@ where
 #[tauri::command]
 pub async fn store_sync_session(
     refresh_token: Option<String>,
-    state: State<'_, DatabaseRuntime>,
+    state: ProfileAccess,
 ) -> Result<(), String> {
     let context = state.context()?;
     match refresh_token
@@ -96,7 +94,7 @@ pub async fn store_sync_session(
 #[tauri::command]
 pub async fn post_login_bootstrap(
     app: AppHandle,
-    state: State<'_, DatabaseRuntime>,
+    state: ProfileAccess,
 ) -> Result<PostLoginBootstrapResult, String> {
     let context = state.context()?;
     let cloned_context = context.clone();
@@ -171,7 +169,7 @@ async fn run_post_login_broker_bootstrap(
 async fn run_post_login_device_bootstrap(
     context: Arc<ServiceContext>,
 ) -> PostLoginBootstrapSyncResult {
-    let Some(identity) = get_sync_identity_from_store() else {
+    let Some(identity) = get_sync_identity_from_store(&context) else {
         return PostLoginBootstrapSyncResult::skipped(PostLoginBootstrapReason::NotEnrolled);
     };
 
@@ -231,7 +229,7 @@ async fn run_post_login_device_bootstrap(
 }
 
 #[tauri::command]
-pub async fn clear_sync_session(state: State<'_, DatabaseRuntime>) -> Result<(), String> {
+pub async fn clear_sync_session(state: ProfileAccess) -> Result<(), String> {
     let context = state.context()?;
     disconnect_cloud_session(&context).await
 }
@@ -243,9 +241,7 @@ pub struct SyncSessionStatus {
 }
 
 #[tauri::command]
-pub fn get_sync_session_status(
-    state: State<'_, DatabaseRuntime>,
-) -> Result<SyncSessionStatus, String> {
+pub fn get_sync_session_status(state: ProfileAccess) -> Result<SyncSessionStatus, String> {
     let context = state.context()?;
     Ok(SyncSessionStatus {
         is_configured: context.connect_service().is_session_configured()?,
@@ -258,7 +254,7 @@ async fn disconnect_cloud_session(context: &ServiceContext) -> Result<(), String
         .connect_service()
         .clear_session_with(|| async {
             #[cfg(feature = "device-sync")]
-            clear_min_snapshot_created_at_from_store();
+            clear_min_snapshot_created_at_from_store(&context);
             let _ = context
                 .app_sync_repository()
                 .clear_all_min_snapshot_created_at()
@@ -282,12 +278,13 @@ pub struct RestoreSyncSessionResponse {
 
 #[tauri::command]
 pub async fn restore_sync_session(
-    state: State<'_, DatabaseRuntime>,
+    state: ProfileAccess,
 ) -> Result<RestoreSyncSessionResponse, String> {
     let context = state.context()?;
     let access_token = context.connect_service().get_valid_access_token().await?;
 
-    let refresh_token = KeyringSecretStore
+    let refresh_token = context
+        .secret_store
         .get_secret(CLOUD_REFRESH_TOKEN_KEY)
         .map_err(|e| format!("Failed to read refresh token: {}", e))?
         .ok_or_else(|| "No sync session configured".to_string())?;

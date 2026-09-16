@@ -3,20 +3,19 @@
 //! This module provides Tauri commands that wrap the shared device sync client,
 //! handling token/device ID storage via the keyring.
 
+use crate::profiles::ProfileAccess;
 mod engine;
 mod snapshot;
 
-use crate::database::DatabaseRuntime;
 use async_trait::async_trait;
 use log::{debug, info, warn};
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex, OnceLock};
-use tauri::{AppHandle, State};
+use std::sync::{Arc, Mutex};
+use tauri::AppHandle;
 
 use crate::context::ServiceContext;
-use crate::secret_store::KeyringSecretStore;
-use wealthfolio_core::secrets::{SecretStore, SYNC_IDENTITY_KEY};
+use wealthfolio_core::secrets::SYNC_IDENTITY_KEY;
 use wealthfolio_device_sync::engine as shared_sync_engine;
 use wealthfolio_device_sync::{
     ClaimPairingRequest, ClaimPairingResponse, CompletePairingRequest, CompletePairingResponse,
@@ -51,8 +50,8 @@ pub(crate) struct SyncIdentity {
     key_version: Option<i32>,
 }
 
-pub(crate) fn get_sync_identity_from_store() -> Option<SyncIdentity> {
-    match KeyringSecretStore.get_secret(SYNC_IDENTITY_KEY) {
+pub(crate) fn get_sync_identity_from_store(context: &ServiceContext) -> Option<SyncIdentity> {
+    match context.secret_store.get_secret(SYNC_IDENTITY_KEY) {
         Ok(Some(json)) => match serde_json::from_str::<SyncIdentity>(&json) {
             Ok(identity) => {
                 if let Some(ref device_id) = identity.device_id {
@@ -91,8 +90,8 @@ pub(crate) fn sync_identity_can_run_background(identity: &SyncIdentity) -> bool 
     identity.device_id.is_some() && identity.root_key.is_some()
 }
 
-fn get_device_id_from_store() -> Option<String> {
-    get_sync_identity_from_store().and_then(|identity| identity.device_id)
+fn get_device_id_from_store(context: &ServiceContext) -> Option<String> {
+    get_sync_identity_from_store(&context).and_then(|identity| identity.device_id)
 }
 
 fn is_pairing_already_confirmed_error(err: &wealthfolio_device_sync::DeviceSyncError) -> bool {
@@ -131,87 +130,87 @@ fn is_pairing_already_approved_error(err: &wealthfolio_device_sync::DeviceSyncEr
 
 pub(super) const SYNC_SOURCE_RESTORE_REQUIRED_CODE: &str = "SYNC_SOURCE_RESTORE_REQUIRED";
 
-static MIN_SNAPSHOT_CREATED_AT: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
-static READY_STATE_OVERWRITE_APPROVALS: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
-static PAIRING_OVERWRITE_APPROVALS: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
-
-fn min_snapshot_created_at_state() -> &'static Mutex<HashMap<String, String>> {
-    MIN_SNAPSHOT_CREATED_AT.get_or_init(|| Mutex::new(HashMap::new()))
+#[derive(Default)]
+pub struct SyncApprovals {
+    min_snapshot: Mutex<HashMap<String, String>>,
+    ready: Mutex<HashMap<String, bool>>,
+    pairing: Mutex<HashMap<String, bool>>,
 }
 
-fn ready_state_overwrite_approval_state() -> &'static Mutex<HashMap<String, bool>> {
-    READY_STATE_OVERWRITE_APPROVALS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn pairing_overwrite_approval_state() -> &'static Mutex<HashMap<String, bool>> {
-    PAIRING_OVERWRITE_APPROVALS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-pub(super) fn get_min_snapshot_created_at_from_store(device_id: &str) -> Option<String> {
-    min_snapshot_created_at_state()
+pub(super) fn get_min_snapshot_created_at_from_store(
+    context: &ServiceContext,
+    device_id: &str,
+) -> Option<String> {
+    context
+        .sync_approvals
+        .min_snapshot
         .lock()
         .ok()
         .and_then(|map| map.get(device_id).cloned())
 }
 
-fn set_min_snapshot_created_at_in_store(device_id: &str, value: &str) {
+fn set_min_snapshot_created_at_in_store(context: &ServiceContext, device_id: &str, value: &str) {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return;
     }
-    if let Ok(mut guard) = min_snapshot_created_at_state().lock() {
+    if let Ok(mut guard) = context.sync_approvals.min_snapshot.lock() {
         guard.insert(device_id.to_string(), trimmed.to_string());
     }
 }
 
-pub(super) fn remove_min_snapshot_created_at_from_store(device_id: &str) {
-    if let Ok(mut guard) = min_snapshot_created_at_state().lock() {
+pub(super) fn remove_min_snapshot_created_at_from_store(context: &ServiceContext, device_id: &str) {
+    if let Ok(mut guard) = context.sync_approvals.min_snapshot.lock() {
         guard.remove(device_id);
     }
 }
 
-pub(super) fn clear_min_snapshot_created_at_from_store() {
-    if let Ok(mut guard) = min_snapshot_created_at_state().lock() {
+pub(super) fn clear_min_snapshot_created_at_from_store(context: &ServiceContext) {
+    if let Ok(mut guard) = context.sync_approvals.min_snapshot.lock() {
         guard.clear();
     }
 }
 
-fn has_ready_state_overwrite_approval(device_id: &str) -> bool {
-    ready_state_overwrite_approval_state()
+fn has_ready_state_overwrite_approval(context: &ServiceContext, device_id: &str) -> bool {
+    context
+        .sync_approvals
+        .ready
         .lock()
         .ok()
         .and_then(|map| map.get(device_id).copied())
         .unwrap_or(false)
 }
 
-fn set_ready_state_overwrite_approval(device_id: &str) {
-    if let Ok(mut guard) = ready_state_overwrite_approval_state().lock() {
+fn set_ready_state_overwrite_approval(context: &ServiceContext, device_id: &str) {
+    if let Ok(mut guard) = context.sync_approvals.ready.lock() {
         guard.insert(device_id.to_string(), true);
     }
 }
 
-fn clear_ready_state_overwrite_approval(device_id: &str) {
-    if let Ok(mut guard) = ready_state_overwrite_approval_state().lock() {
+fn clear_ready_state_overwrite_approval(context: &ServiceContext, device_id: &str) {
+    if let Ok(mut guard) = context.sync_approvals.ready.lock() {
         guard.remove(device_id);
     }
 }
 
-fn has_pairing_overwrite_approval(pairing_id: &str) -> bool {
-    pairing_overwrite_approval_state()
+fn has_pairing_overwrite_approval(context: &ServiceContext, pairing_id: &str) -> bool {
+    context
+        .sync_approvals
+        .pairing
         .lock()
         .ok()
         .and_then(|map| map.get(pairing_id).copied())
         .unwrap_or(false)
 }
 
-fn set_pairing_overwrite_approval(pairing_id: &str) {
-    if let Ok(mut guard) = pairing_overwrite_approval_state().lock() {
+fn set_pairing_overwrite_approval(context: &ServiceContext, pairing_id: &str) {
+    if let Ok(mut guard) = context.sync_approvals.pairing.lock() {
         guard.insert(pairing_id.to_string(), true);
     }
 }
 
-fn clear_pairing_overwrite_approval(pairing_id: &str) {
-    if let Ok(mut guard) = pairing_overwrite_approval_state().lock() {
+fn clear_pairing_overwrite_approval(context: &ServiceContext, pairing_id: &str) {
+    if let Ok(mut guard) = context.sync_approvals.pairing.lock() {
         guard.remove(pairing_id);
     }
 }
@@ -233,9 +232,9 @@ fn pairing_bootstrap_phase(
 }
 
 async fn abort_pairing_flow_local_state(context: &Arc<ServiceContext>, pairing_id: &str) {
-    clear_pairing_overwrite_approval(pairing_id);
+    clear_pairing_overwrite_approval(&context, pairing_id);
 
-    let device_id = get_device_id_from_store();
+    let device_id = get_device_id_from_store(&context);
     if let Some(device_id) = device_id.as_deref() {
         if let Ok(token) = get_access_token(context).await {
             if let Ok(client) = create_client() {
@@ -248,7 +247,7 @@ async fn abort_pairing_flow_local_state(context: &Arc<ServiceContext>, pairing_i
                 }
             }
         }
-        remove_min_snapshot_created_at_from_store(device_id);
+        remove_min_snapshot_created_at_from_store(&context, device_id);
         let _ = context
             .app_sync_repository()
             .clear_min_snapshot_created_at(device_id.to_string())
@@ -271,7 +270,7 @@ async fn abort_pairing_flow_local_state(context: &Arc<ServiceContext>, pairing_i
         .app_sync_repository()
         .reset_local_sync_session()
         .await;
-    clear_min_snapshot_created_at_from_store();
+    clear_min_snapshot_created_at_from_store(&context);
     let _ = context
         .app_sync_repository()
         .clear_all_min_snapshot_created_at()
@@ -548,14 +547,11 @@ fn decrypt_sync_payload(
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[tauri::command(rename_all = "camelCase")]
-pub async fn get_device(
-    device_id: Option<String>,
-    state: State<'_, DatabaseRuntime>,
-) -> Result<Device, String> {
+pub async fn get_device(device_id: Option<String>, state: ProfileAccess) -> Result<Device, String> {
     let context = state.context()?;
     let token = get_access_token(&context).await?;
     let device_id = device_id
-        .or_else(get_device_id_from_store)
+        .or_else(|| get_device_id_from_store(&context))
         .ok_or_else(|| "No device ID configured".to_string())?;
 
     create_client()?
@@ -567,7 +563,7 @@ pub async fn get_device(
 #[tauri::command]
 pub async fn list_devices(
     scope: Option<String>,
-    state: State<'_, DatabaseRuntime>,
+    state: ProfileAccess,
 ) -> Result<Vec<Device>, String> {
     let context = state.context()?;
     info!("[DeviceSync] Listing devices (scope: {:?})...", scope);
@@ -587,7 +583,7 @@ pub async fn list_devices(
 pub async fn update_device(
     device_id: String,
     display_name: Option<String>,
-    state: State<'_, DatabaseRuntime>,
+    state: ProfileAccess,
 ) -> Result<SuccessResponse, String> {
     let context = state.context()?;
     info!(
@@ -613,7 +609,7 @@ pub async fn update_device(
 #[tauri::command(rename_all = "camelCase")]
 pub async fn delete_device(
     device_id: String,
-    state: State<'_, DatabaseRuntime>,
+    state: ProfileAccess,
 ) -> Result<SuccessResponse, String> {
     let context = state.context()?;
     info!("[DeviceSync] Deleting device: {}", device_id);
@@ -629,7 +625,7 @@ pub async fn delete_device(
 #[tauri::command(rename_all = "camelCase")]
 pub async fn revoke_device(
     device_id: String,
-    state: State<'_, DatabaseRuntime>,
+    state: ProfileAccess,
 ) -> Result<SuccessResponse, String> {
     let context = state.context()?;
     info!("[DeviceSync] Revoking device: {}", device_id);
@@ -649,7 +645,7 @@ pub async fn revoke_device(
 #[tauri::command]
 pub async fn reset_team_sync(
     reason: Option<String>,
-    state: State<'_, DatabaseRuntime>,
+    state: ProfileAccess,
 ) -> Result<ResetTeamSyncResponse, String> {
     let context = state.context()?;
     info!("[DeviceSync] Resetting team sync...");
@@ -666,13 +662,11 @@ pub async fn reset_team_sync(
 // Engine Status & Tauri Command Wrappers
 // ─────────────────────────────────────────────────────────────────────────────
 
-pub async fn sync_engine_status(
-    state: State<'_, DatabaseRuntime>,
-) -> Result<SyncEngineStatusResult, String> {
+pub async fn sync_engine_status(state: ProfileAccess) -> Result<SyncEngineStatusResult, String> {
     let context = state.context()?;
     let sync_repo = context.app_sync_repository();
     let status = sync_repo.get_engine_status().map_err(|e| e.to_string())?;
-    let bootstrap_required = match get_device_id_from_store() {
+    let bootstrap_required = match get_device_id_from_store(&context) {
         Some(device_id) => sync_repo
             .needs_bootstrap(&device_id)
             .map_err(|e| e.to_string())?,
@@ -697,11 +691,11 @@ pub async fn sync_engine_status(
 
 #[tauri::command]
 pub async fn device_sync_bootstrap_overwrite_check(
-    state: State<'_, DatabaseRuntime>,
+    state: ProfileAccess,
 ) -> Result<SyncBootstrapOverwriteCheckResult, String> {
     let context = state.context()?;
     let sync_repo = context.app_sync_repository();
-    let device_id = get_device_id_from_store();
+    let device_id = get_device_id_from_store(&context);
     let bootstrap_required = match device_id.as_deref() {
         Some(device_id) => sync_repo
             .needs_bootstrap(device_id)
@@ -710,7 +704,7 @@ pub async fn device_sync_bootstrap_overwrite_check(
     };
     if !bootstrap_required {
         if let Some(device_id) = device_id.as_deref() {
-            clear_ready_state_overwrite_approval(device_id);
+            clear_ready_state_overwrite_approval(&context, device_id);
         }
         return Ok(SyncBootstrapOverwriteCheckResult {
             bootstrap_required,
@@ -721,7 +715,7 @@ pub async fn device_sync_bootstrap_overwrite_check(
     }
 
     if let Some(device_id) = device_id.as_deref() {
-        if has_ready_state_overwrite_approval(device_id) {
+        if has_ready_state_overwrite_approval(&context, device_id) {
             return Ok(SyncBootstrapOverwriteCheckResult {
                 bootstrap_required,
                 has_local_data: false,
@@ -752,16 +746,14 @@ pub async fn device_sync_bootstrap_overwrite_check(
     })
 }
 
-pub async fn sync_trigger_cycle(
-    state: State<'_, DatabaseRuntime>,
-) -> Result<SyncCycleResult, String> {
+pub async fn sync_trigger_cycle(state: ProfileAccess) -> Result<SyncCycleResult, String> {
     let context = state.context()?;
     engine::run_sync_cycle(Arc::clone(&context), false).await
 }
 
 #[tauri::command]
 pub async fn device_sync_start_background_engine(
-    state: State<'_, DatabaseRuntime>,
+    state: ProfileAccess,
 ) -> Result<SyncBackgroundEngineResult, String> {
     let context = state.context()?;
     ensure_background_engine_started(Arc::clone(&context)).await?;
@@ -782,7 +774,7 @@ pub async fn device_sync_start_background_engine(
 
 #[tauri::command]
 pub async fn device_sync_stop_background_engine(
-    state: State<'_, DatabaseRuntime>,
+    state: ProfileAccess,
 ) -> Result<SyncBackgroundEngineResult, String> {
     let context = state.context()?;
     ensure_background_engine_stopped(Arc::clone(&context)).await?;
@@ -795,7 +787,7 @@ pub async fn device_sync_stop_background_engine(
 #[tauri::command]
 pub async fn device_sync_generate_snapshot_now(
     handle: AppHandle,
-    state: State<'_, DatabaseRuntime>,
+    state: ProfileAccess,
 ) -> Result<SyncSnapshotUploadResult, String> {
     let context = state.context()?;
     snapshot::generate_snapshot_now_internal(Some(&handle), Arc::clone(&context)).await
@@ -803,7 +795,7 @@ pub async fn device_sync_generate_snapshot_now(
 
 #[tauri::command]
 pub async fn device_sync_cancel_snapshot_upload(
-    state: State<'_, DatabaseRuntime>,
+    state: ProfileAccess,
 ) -> Result<SyncBackgroundEngineResult, String> {
     let context = state.context()?;
     context
@@ -818,14 +810,14 @@ pub async fn device_sync_cancel_snapshot_upload(
 
 #[tauri::command]
 pub async fn device_sync_engine_status(
-    state: State<'_, DatabaseRuntime>,
+    state: ProfileAccess,
 ) -> Result<SyncEngineStatusResult, String> {
     sync_engine_status(state).await
 }
 
 #[tauri::command]
 pub async fn device_sync_pairing_source_status(
-    state: State<'_, DatabaseRuntime>,
+    state: ProfileAccess,
 ) -> Result<SyncPairingSourceStatusResult, String> {
     let context = state.context()?;
     snapshot::get_pairing_source_status_internal(Arc::clone(&context)).await
@@ -835,17 +827,17 @@ pub async fn device_sync_pairing_source_status(
 pub async fn device_sync_reconcile_ready_state(
     allow_overwrite: bool,
     handle: AppHandle,
-    state: State<'_, DatabaseRuntime>,
+    state: ProfileAccess,
 ) -> Result<SyncReconcileReadyStateResult, String> {
     let context = state.context()?;
-    let device_id = get_device_id_from_store();
+    let device_id = get_device_id_from_store(&context);
     let has_overwrite_approval = device_id
         .as_deref()
-        .map(has_ready_state_overwrite_approval)
+        .map(|id| has_ready_state_overwrite_approval(&context, id))
         .unwrap_or(false);
     if allow_overwrite {
         if let Some(device_id) = device_id.as_deref() {
-            set_ready_state_overwrite_approval(device_id);
+            set_ready_state_overwrite_approval(&context, device_id);
         }
     }
 
@@ -859,9 +851,9 @@ pub async fn device_sync_reconcile_ready_state(
         if (allow_overwrite || has_overwrite_approval)
             && should_keep_ready_state_overwrite_approval(&result)
         {
-            set_ready_state_overwrite_approval(device_id);
+            set_ready_state_overwrite_approval(&context, device_id);
         } else {
-            clear_ready_state_overwrite_approval(device_id);
+            clear_ready_state_overwrite_approval(&context, device_id);
         }
     }
 
@@ -871,7 +863,7 @@ pub async fn device_sync_reconcile_ready_state(
 #[tauri::command]
 pub async fn device_sync_bootstrap_snapshot_if_needed(
     handle: AppHandle,
-    state: State<'_, DatabaseRuntime>,
+    state: ProfileAccess,
 ) -> Result<SyncBootstrapResult, String> {
     let context = state.context()?;
     let cloned_context = Arc::clone(&context);
@@ -916,9 +908,7 @@ pub async fn device_sync_bootstrap_snapshot_if_needed(
 }
 
 #[tauri::command]
-pub async fn device_sync_trigger_cycle(
-    state: State<'_, DatabaseRuntime>,
-) -> Result<SyncCycleResult, String> {
+pub async fn device_sync_trigger_cycle(state: ProfileAccess) -> Result<SyncCycleResult, String> {
     sync_trigger_cycle(state).await
 }
 
@@ -930,14 +920,14 @@ pub async fn device_sync_trigger_cycle(
 pub async fn create_pairing(
     code_hash: String,
     ephemeral_public_key: String,
-    state: State<'_, DatabaseRuntime>,
+    state: ProfileAccess,
 ) -> Result<CreatePairingResponse, String> {
     let context = state.context()?;
     debug!("[DeviceSync] Creating pairing session...");
 
     let token = get_access_token(&context).await?;
     let device_id =
-        get_device_id_from_store().ok_or_else(|| "No device ID configured".to_string())?;
+        get_device_id_from_store(&context).ok_or_else(|| "No device ID configured".to_string())?;
 
     create_client()?
         .create_pairing(
@@ -955,14 +945,14 @@ pub async fn create_pairing(
 #[tauri::command(rename_all = "camelCase")]
 pub async fn get_pairing(
     pairing_id: String,
-    state: State<'_, DatabaseRuntime>,
+    state: ProfileAccess,
 ) -> Result<GetPairingResponse, String> {
     let context = state.context()?;
     debug!("[DeviceSync] Getting pairing session: {}", pairing_id);
 
     let token = get_access_token(&context).await?;
     let device_id =
-        get_device_id_from_store().ok_or_else(|| "No device ID configured".to_string())?;
+        get_device_id_from_store(&context).ok_or_else(|| "No device ID configured".to_string())?;
 
     create_client()?
         .get_pairing(&token, &device_id, &pairing_id)
@@ -973,14 +963,14 @@ pub async fn get_pairing(
 #[tauri::command(rename_all = "camelCase")]
 pub async fn approve_pairing(
     pairing_id: String,
-    state: State<'_, DatabaseRuntime>,
+    state: ProfileAccess,
 ) -> Result<SuccessResponse, String> {
     let context = state.context()?;
     debug!("[DeviceSync] Approving pairing session: {}", pairing_id);
 
     let token = get_access_token(&context).await?;
     let device_id =
-        get_device_id_from_store().ok_or_else(|| "No device ID configured".to_string())?;
+        get_device_id_from_store(&context).ok_or_else(|| "No device ID configured".to_string())?;
 
     create_client()?
         .approve_pairing(&token, &device_id, &pairing_id)
@@ -997,7 +987,7 @@ pub async fn complete_pairing(
     encrypted_key_bundle: String,
     sas_proof: serde_json::Value,
     signature: String,
-    state: State<'_, DatabaseRuntime>,
+    state: ProfileAccess,
 ) -> Result<CompletePairingResponse, String> {
     let context = state.context()?;
     debug!("[DeviceSync] Completing pairing session: {}", pairing_id);
@@ -1007,7 +997,7 @@ pub async fn complete_pairing(
 
     let token = get_access_token(&context).await?;
     let device_id =
-        get_device_id_from_store().ok_or_else(|| "No device ID configured".to_string())?;
+        get_device_id_from_store(&context).ok_or_else(|| "No device ID configured".to_string())?;
 
     let result = create_client()?
         .complete_pairing(
@@ -1037,14 +1027,14 @@ pub async fn complete_pairing(
 #[tauri::command(rename_all = "camelCase")]
 pub async fn cancel_pairing(
     pairing_id: String,
-    state: State<'_, DatabaseRuntime>,
+    state: ProfileAccess,
 ) -> Result<SuccessResponse, String> {
     let context = state.context()?;
     debug!("[DeviceSync] Canceling pairing session: {}", pairing_id);
 
     let token = get_access_token(&context).await?;
     let device_id =
-        get_device_id_from_store().ok_or_else(|| "No device ID configured".to_string())?;
+        get_device_id_from_store(&context).ok_or_else(|| "No device ID configured".to_string())?;
 
     create_client()?
         .cancel_pairing(&token, &device_id, &pairing_id)
@@ -1060,14 +1050,14 @@ pub async fn cancel_pairing(
 pub async fn claim_pairing(
     code: String,
     ephemeral_public_key: String,
-    state: State<'_, DatabaseRuntime>,
+    state: ProfileAccess,
 ) -> Result<ClaimPairingResponse, String> {
     let context = state.context()?;
     info!("[DeviceSync] Claiming pairing session...");
 
     let token = get_access_token(&context).await?;
     let device_id =
-        get_device_id_from_store().ok_or_else(|| "No device ID configured".to_string())?;
+        get_device_id_from_store(&context).ok_or_else(|| "No device ID configured".to_string())?;
 
     create_client()?
         .claim_pairing(
@@ -1085,14 +1075,14 @@ pub async fn claim_pairing(
 #[tauri::command(rename_all = "camelCase")]
 pub async fn get_pairing_messages(
     pairing_id: String,
-    state: State<'_, DatabaseRuntime>,
+    state: ProfileAccess,
 ) -> Result<PairingMessagesResponse, String> {
     let context = state.context()?;
     debug!("[DeviceSync] Polling for pairing messages: {}", pairing_id);
 
     let token = get_access_token(&context).await?;
     let device_id =
-        get_device_id_from_store().ok_or_else(|| "No device ID configured".to_string())?;
+        get_device_id_from_store(&context).ok_or_else(|| "No device ID configured".to_string())?;
 
     create_client()?
         .get_pairing_messages(&token, &device_id, &pairing_id)
@@ -1117,13 +1107,13 @@ pub async fn complete_pairing_with_transfer(
     sas_proof: serde_json::Value,
     signature: String,
     handle: AppHandle,
-    state: State<'_, DatabaseRuntime>,
+    state: ProfileAccess,
 ) -> Result<serde_json::Value, String> {
     let context = state.context()?;
     info!("[DeviceSync] complete_pairing_with_transfer: starting");
     let cloned_context = Arc::clone(&context);
-    let identity =
-        get_sync_identity_from_store().ok_or_else(|| "No sync identity configured".to_string())?;
+    let identity = get_sync_identity_from_store(&context)
+        .ok_or_else(|| "No sync identity configured".to_string())?;
     let device_id = identity
         .device_id
         .clone()
@@ -1198,13 +1188,13 @@ pub async fn confirm_pairing_with_bootstrap(
     min_snapshot_created_at: Option<String>,
     allow_overwrite: bool,
     handle: AppHandle,
-    state: State<'_, DatabaseRuntime>,
+    state: ProfileAccess,
 ) -> Result<ConfirmPairingWithBootstrapResult, String> {
     let context = state.context()?;
     info!("[DeviceSync] confirm_pairing_with_bootstrap: starting");
     let cloned_context = Arc::clone(&context);
     let device_id =
-        get_device_id_from_store().ok_or_else(|| "No device ID configured".to_string())?;
+        get_device_id_from_store(&context).ok_or_else(|| "No device ID configured".to_string())?;
     let token = get_access_token(&context).await?;
     let client = create_client()?;
 
@@ -1244,7 +1234,7 @@ pub async fn confirm_pairing_with_bootstrap(
                 if let Ok(normalized) =
                     wealthfolio_device_sync::normalize_sync_datetime(min_created_at)
                 {
-                    set_min_snapshot_created_at_in_store(&device_id, &normalized);
+                    set_min_snapshot_created_at_in_store(&context, &device_id, &normalized);
                     let _ = cloned_context
                         .app_sync_repository()
                         .set_min_snapshot_created_at(device_id.clone(), normalized)
@@ -1260,7 +1250,7 @@ pub async fn confirm_pairing_with_bootstrap(
         .needs_bootstrap(&device_id)
         .map_err(|e| e.to_string())?;
     if !needs_bootstrap {
-        clear_pairing_overwrite_approval(&pairing_id);
+        clear_pairing_overwrite_approval(&context, &pairing_id);
         return Ok(ConfirmPairingWithBootstrapResult {
             status: "already_complete".to_string(),
             message: "No bootstrap needed".to_string(),
@@ -1271,9 +1261,10 @@ pub async fn confirm_pairing_with_bootstrap(
 
     // 4. Check overwrite risk
     if allow_overwrite {
-        set_pairing_overwrite_approval(&pairing_id);
+        set_pairing_overwrite_approval(&context, &pairing_id);
     }
-    let overwrite_approved = allow_overwrite || has_pairing_overwrite_approval(&pairing_id);
+    let overwrite_approved =
+        allow_overwrite || has_pairing_overwrite_approval(&context, &pairing_id);
     if !overwrite_approved {
         let summary = cloned_context
             .app_sync_repository()
@@ -1324,7 +1315,7 @@ pub async fn confirm_pairing_with_bootstrap(
         }
     });
 
-    clear_pairing_overwrite_approval(&pairing_id);
+    clear_pairing_overwrite_approval(&context, &pairing_id);
 
     Ok(ConfirmPairingWithBootstrapResult {
         status: "applied".to_string(),
@@ -1349,13 +1340,13 @@ pub async fn begin_pairing_confirm(
     proof: String,
     min_snapshot_created_at: Option<String>,
     handle: AppHandle,
-    state: State<'_, DatabaseRuntime>,
+    state: ProfileAccess,
 ) -> Result<PairingFlowResponse, String> {
     let context = state.context()?;
     info!("[DeviceSync] begin_pairing_confirm: starting");
     let cloned_context = Arc::clone(&context);
     let device_id =
-        get_device_id_from_store().ok_or_else(|| "No device ID configured".to_string())?;
+        get_device_id_from_store(&context).ok_or_else(|| "No device ID configured".to_string())?;
     let token = get_access_token(&context).await?;
     let client = create_client()?;
     let runtime = cloned_context.device_sync_runtime();
@@ -1389,7 +1380,7 @@ pub async fn begin_pairing_confirm(
                 if let Ok(normalized) =
                     wealthfolio_device_sync::normalize_sync_datetime(min_created_at)
                 {
-                    set_min_snapshot_created_at_in_store(&device_id, &normalized);
+                    set_min_snapshot_created_at_in_store(&context, &device_id, &normalized);
                     let _ = cloned_context
                         .app_sync_repository()
                         .set_min_snapshot_created_at(device_id.clone(), normalized)
@@ -1462,7 +1453,7 @@ pub async fn begin_pairing_confirm(
 pub async fn get_pairing_flow_state(
     flow_id: String,
     handle: AppHandle,
-    state: State<'_, DatabaseRuntime>,
+    state: ProfileAccess,
 ) -> Result<PairingFlowResponse, String> {
     let context = state.context()?;
     let cloned_context = Arc::clone(&context);
@@ -1495,7 +1486,7 @@ pub async fn get_pairing_flow_state(
                             }
                         });
                         if let Some(pid) = runtime.get_flow_pairing_id(&flow_id)? {
-                            clear_pairing_overwrite_approval(&pid);
+                            clear_pairing_overwrite_approval(&context, &pid);
                         }
                         runtime.remove_flow(&flow_id)?;
                         return Ok(PairingFlowResponse {
@@ -1505,7 +1496,7 @@ pub async fn get_pairing_flow_state(
                     }
                     Err(e) => {
                         if let Some(pid) = runtime.get_flow_pairing_id(&flow_id)? {
-                            clear_pairing_overwrite_approval(&pid);
+                            clear_pairing_overwrite_approval(&context, &pid);
                         }
                         runtime.remove_flow(&flow_id)?;
                         return Ok(PairingFlowResponse {
@@ -1516,7 +1507,7 @@ pub async fn get_pairing_flow_state(
                 },
                 Err(e) => {
                     if let Some(pid) = runtime.get_flow_pairing_id(&flow_id)? {
-                        clear_pairing_overwrite_approval(&pid);
+                        clear_pairing_overwrite_approval(&context, &pid);
                     }
                     runtime.remove_flow(&flow_id)?;
                     return Ok(PairingFlowResponse {
@@ -1536,7 +1527,7 @@ pub async fn get_pairing_flow_state(
 pub async fn approve_pairing_overwrite(
     flow_id: String,
     handle: AppHandle,
-    state: State<'_, DatabaseRuntime>,
+    state: ProfileAccess,
 ) -> Result<PairingFlowResponse, String> {
     let context = state.context()?;
     let cloned_context = Arc::clone(&context);
@@ -1554,7 +1545,7 @@ pub async fn approve_pairing_overwrite(
         .ok_or_else(|| "Flow not found".to_string())?;
 
     // Set approval flag so bootstrap proceeds
-    set_pairing_overwrite_approval(&pairing_id);
+    set_pairing_overwrite_approval(&context, &pairing_id);
 
     // Transition to syncing
     runtime.set_flow_phase(
@@ -1570,7 +1561,7 @@ pub async fn approve_pairing_overwrite(
             if let Some(phase) = match pairing_bootstrap_phase(&bootstrap) {
                 Ok(phase) => phase,
                 Err(e) => {
-                    clear_pairing_overwrite_approval(&pairing_id);
+                    clear_pairing_overwrite_approval(&context, &pairing_id);
                     runtime.remove_flow(&flow_id)?;
                     return Ok(PairingFlowResponse {
                         flow_id,
@@ -1590,7 +1581,7 @@ pub async fn approve_pairing_overwrite(
                     log::warn!("[DeviceSync] Post-overwrite engine start failed: {}", err);
                 }
             });
-            clear_pairing_overwrite_approval(&pairing_id);
+            clear_pairing_overwrite_approval(&context, &pairing_id);
             runtime.remove_flow(&flow_id)?;
             Ok(PairingFlowResponse {
                 flow_id,
@@ -1598,7 +1589,7 @@ pub async fn approve_pairing_overwrite(
             })
         }
         Err(e) => {
-            clear_pairing_overwrite_approval(&pairing_id);
+            clear_pairing_overwrite_approval(&context, &pairing_id);
             runtime.remove_flow(&flow_id)?;
             Ok(PairingFlowResponse {
                 flow_id,
@@ -1612,7 +1603,7 @@ pub async fn approve_pairing_overwrite(
 #[tauri::command(rename_all = "camelCase")]
 pub async fn cancel_pairing_flow(
     flow_id: String,
-    state: State<'_, DatabaseRuntime>,
+    state: ProfileAccess,
 ) -> Result<PairingFlowResponse, String> {
     let context = state.context()?;
     let cloned_context = Arc::clone(&context);
@@ -1635,14 +1626,14 @@ pub async fn confirm_pairing(
     pairing_id: String,
     proof: Option<String>,
     min_snapshot_created_at: Option<String>,
-    state: State<'_, DatabaseRuntime>,
+    state: ProfileAccess,
 ) -> Result<ConfirmPairingResponse, String> {
     let context = state.context()?;
     info!("[DeviceSync] Confirming pairing: {}", pairing_id);
 
     let token = get_access_token(&context).await?;
     let device_id =
-        get_device_id_from_store().ok_or_else(|| "No device ID configured".to_string())?;
+        get_device_id_from_store(&context).ok_or_else(|| "No device ID configured".to_string())?;
 
     let result = create_client()?
         .confirm_pairing(
@@ -1666,7 +1657,7 @@ pub async fn confirm_pairing(
             } else {
                 match wealthfolio_device_sync::normalize_sync_datetime(min_created_at) {
                     Ok(normalized) => {
-                        set_min_snapshot_created_at_in_store(&device_id, &normalized);
+                        set_min_snapshot_created_at_in_store(&context, &device_id, &normalized);
                         // Persist to SQLite so the gate survives process restarts
                         if let Err(err) = context
                             .app_sync_repository()

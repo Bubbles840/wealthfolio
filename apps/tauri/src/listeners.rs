@@ -1,42 +1,24 @@
-use crate::database::DatabaseRuntime;
 use futures::FutureExt;
 use log::{error, info, warn};
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Instant;
-use tauri::{async_runtime::spawn, AppHandle, Emitter, Listener, Manager};
+use tauri::{async_runtime::spawn, AppHandle};
 use wealthfolio_core::health::HealthServiceTrait;
 use wealthfolio_core::portfolio::snapshot::{
     reconcile_quote_sync_from_latest_account_snapshots, snapshot_date_requires_remediation,
     SnapshotRecalcMode,
 };
 use wealthfolio_core::portfolio::valuation::ValuationRecalcMode;
-use wealthfolio_core::quotes::{MarketSyncMode, SyncResult};
+use wealthfolio_core::quotes::SyncResult;
 use wealthfolio_core::utils::time_utils::{parse_user_timezone_or_default, user_today};
 
 use crate::context::ServiceContext;
 use crate::events::{
-    emit_portfolio_trigger_recalculate, emit_portfolio_trigger_update, MarketSyncResult,
-    PortfolioRequestPayload, MARKET_SYNC_COMPLETE, MARKET_SYNC_ERROR, MARKET_SYNC_START,
-    PORTFOLIO_TRIGGER_RECALCULATE, PORTFOLIO_TRIGGER_UPDATE, PORTFOLIO_UPDATE_COMPLETE,
-    PORTFOLIO_UPDATE_ERROR, PORTFOLIO_UPDATE_START,
+    MarketSyncResult, PortfolioRequestPayload, MARKET_SYNC_COMPLETE, MARKET_SYNC_ERROR,
+    MARKET_SYNC_START, PORTFOLIO_UPDATE_COMPLETE, PORTFOLIO_UPDATE_ERROR, PORTFOLIO_UPDATE_START,
 };
-
-/// Sets up the global event listeners for the application.
-pub fn setup_event_listeners(handle: AppHandle) {
-    // Listener for consolidated portfolio update requests
-    let update_handle = handle.clone();
-    handle.listen(PORTFOLIO_TRIGGER_UPDATE, move |event| {
-        handle_portfolio_request(update_handle.clone(), event.payload(), false);
-    });
-
-    // Listener for full portfolio recalculation requests
-    let recalc_handle = handle.clone();
-    handle.listen(PORTFOLIO_TRIGGER_RECALCULATE, move |event| {
-        handle_portfolio_request(recalc_handle.clone(), event.payload(), true);
-    });
-}
 
 fn resolve_listener_account_ids(
     context: &Arc<ServiceContext>,
@@ -90,135 +72,109 @@ async fn run_market_sync(
 }
 
 /// Handles the common logic for both portfolio update and recalculation requests.
-fn handle_portfolio_request(handle: AppHandle, payload_str: &str, force_recalc: bool) {
-    let event_name = if force_recalc {
-        PORTFOLIO_TRIGGER_RECALCULATE
-    } else {
-        PORTFOLIO_TRIGGER_UPDATE
-    };
+pub(crate) fn handle_portfolio_request(
+    handle: AppHandle,
+    context: Arc<ServiceContext>,
+    payload: PortfolioRequestPayload,
+    force_recalc: bool,
+) {
+    if !context.is_active() {
+        return;
+    }
+    let handle_clone = handle.clone(); // Clone handle for async block
 
-    match serde_json::from_str::<PortfolioRequestPayload>(payload_str) {
-        Ok(payload) => {
-            let handle_clone = handle.clone(); // Clone handle for async block
+    // Spawn a task to handle the update/recalculate steps
+    spawn(async move {
+        let market_sync_mode = payload.market_sync_mode.clone();
+        let accounts_to_recalc = payload.account_ids.clone();
+        let since_date = payload.since_date;
+        {
+            // Only perform market sync if the mode requires it
+            if market_sync_mode.requires_sync() {
+                let market_data_service = context.quote_service();
+                let snapshot_service = context.snapshot_service();
+                let account_ids_for_sync = resolve_listener_account_ids(&context, None)
+                    .unwrap_or_else(|err| {
+                        warn!(
+                            "Failed to resolve accounts for quote sync reconciliation: {}",
+                            err
+                        );
+                        Vec::new()
+                    });
 
-            // Spawn a task to handle the update/recalculate steps
-            spawn(async move {
-                let market_sync_mode = payload.market_sync_mode.clone();
-                let accounts_to_recalc = payload.account_ids.clone();
-                let since_date = payload.since_date;
-                let context_result = handle_clone.state::<DatabaseRuntime>().try_context();
-
-                if let Some(context) = context_result {
-                    // Only perform market sync if the mode requires it
-                    if market_sync_mode.requires_sync() {
-                        let market_data_service = context.quote_service();
-                        let snapshot_service = context.snapshot_service();
-                        let account_ids_for_sync = resolve_listener_account_ids(&context, None)
-                            .unwrap_or_else(|err| {
-                                warn!(
-                                    "Failed to resolve accounts for quote sync reconciliation: {}",
-                                    err
-                                );
-                                Vec::new()
-                            });
-
-                        if let Err(e) = reconcile_quote_sync_from_latest_account_snapshots(
-                            snapshot_service.as_ref(),
-                            market_data_service.as_ref(),
-                            &account_ids_for_sync,
-                        )
-                        .await
-                        {
-                            warn!(
+                if let Err(e) = reconcile_quote_sync_from_latest_account_snapshots(
+                    snapshot_service.as_ref(),
+                    market_data_service.as_ref(),
+                    &account_ids_for_sync,
+                )
+                .await
+                {
+                    warn!(
                                 "Failed to reconcile quote sync state from latest holdings: {}. Quote sync planning may be affected.",
+                                e
+                            );
+                }
+
+                // Emit sync start event
+                if let Err(e) =
+                    crate::events::emit_for_profile(&handle_clone, &context, MARKET_SYNC_START, &())
+                {
+                    error!("Failed to emit market:sync-start event: {}", e);
+                }
+
+                let sync_start = Instant::now();
+                let asset_ids = market_sync_mode.asset_ids().cloned();
+
+                // Convert MarketSyncMode to SyncMode for the quote service
+                let sync_result = match market_sync_mode.to_sync_mode() {
+                    Some(sync_mode) => {
+                        run_market_sync(market_data_service.sync(sync_mode, asset_ids)).await
+                    }
+                    None => {
+                        // This shouldn't happen since we checked requires_sync()
+                        warn!("MarketSyncMode requires sync but returned None for SyncMode");
+                        Ok(wealthfolio_core::quotes::SyncResult::default())
+                    }
+                };
+
+                let sync_duration = sync_start.elapsed();
+                info!("Market data sync completed in: {:?}", sync_duration);
+
+                match sync_result {
+                    Ok(result) => {
+                        // Convert SyncResult to legacy format for backwards compatibility
+                        let failed_syncs = result.failures;
+                        let skipped_reasons = result
+                            .skipped_reasons
+                            .into_iter()
+                            .map(|(asset_id, reason)| (asset_id, reason.to_string()))
+                            .collect();
+
+                        context.health_service().clear_cache().await;
+
+                        let result_payload = MarketSyncResult {
+                            failed_syncs,
+                            skipped_reasons,
+                            show_skipped_reasons: false,
+                        };
+                        if let Err(e) = crate::events::emit_for_profile(
+                            &handle_clone,
+                            &context,
+                            MARKET_SYNC_COMPLETE,
+                            &result_payload,
+                        ) {
+                            error!("Failed to emit market:sync-complete event: {}", e);
+                        }
+                        // Initialize the FxService after successful sync
+                        let fx_service = context.fx_service();
+                        if let Err(e) = fx_service.initialize() {
+                            error!(
+                                "Failed to initialize FxService after market data sync: {}",
                                 e
                             );
                         }
 
-                        // Emit sync start event
-                        if let Err(e) = handle_clone.emit(MARKET_SYNC_START, &()) {
-                            error!("Failed to emit market:sync-start event: {}", e);
-                        }
-
-                        let sync_start = Instant::now();
-                        let asset_ids = market_sync_mode.asset_ids().cloned();
-
-                        // Convert MarketSyncMode to SyncMode for the quote service
-                        let sync_result = match market_sync_mode.to_sync_mode() {
-                            Some(sync_mode) => {
-                                run_market_sync(market_data_service.sync(sync_mode, asset_ids))
-                                    .await
-                            }
-                            None => {
-                                // This shouldn't happen since we checked requires_sync()
-                                warn!(
-                                    "MarketSyncMode requires sync but returned None for SyncMode"
-                                );
-                                Ok(wealthfolio_core::quotes::SyncResult::default())
-                            }
-                        };
-
-                        let sync_duration = sync_start.elapsed();
-                        info!("Market data sync completed in: {:?}", sync_duration);
-
-                        match sync_result {
-                            Ok(result) => {
-                                // Convert SyncResult to legacy format for backwards compatibility
-                                let failed_syncs = result.failures;
-                                let skipped_reasons = result
-                                    .skipped_reasons
-                                    .into_iter()
-                                    .map(|(asset_id, reason)| (asset_id, reason.to_string()))
-                                    .collect();
-
-                                context.health_service().clear_cache().await;
-
-                                let result_payload = MarketSyncResult {
-                                    failed_syncs,
-                                    skipped_reasons,
-                                    show_skipped_reasons: false,
-                                };
-                                if let Err(e) =
-                                    handle_clone.emit(MARKET_SYNC_COMPLETE, &result_payload)
-                                {
-                                    error!("Failed to emit market:sync-complete event: {}", e);
-                                }
-                                // Initialize the FxService after successful sync
-                                let fx_service = context.fx_service();
-                                if let Err(e) = fx_service.initialize() {
-                                    error!(
-                                        "Failed to initialize FxService after market data sync: {}",
-                                        e
-                                    );
-                                }
-
-                                // Trigger calculation after successful sync
-                                let (snap_mode, val_mode) = recalculation_modes(
-                                    force_recalc,
-                                    since_date,
-                                    user_today(parse_user_timezone_or_default(
-                                        &context.get_timezone(),
-                                    )),
-                                );
-                                handle_portfolio_calculation(
-                                    handle_clone.clone(),
-                                    accounts_to_recalc,
-                                    snap_mode,
-                                    val_mode,
-                                );
-                            }
-                            Err(e) => {
-                                if let Err(e_emit) =
-                                    handle_clone.emit(MARKET_SYNC_ERROR, &e.to_string())
-                                {
-                                    error!("Failed to emit market:sync-error event: {}", e_emit);
-                                }
-                                error!("Market data sync failed: {}. Skipping portfolio calculation for this request.", e);
-                            }
-                        }
-                    } else {
-                        // MarketSyncMode::None - skip market sync, just recalculate
-                        info!("Skipping market sync (MarketSyncMode::None)");
+                        // Trigger calculation after successful sync
                         let (snap_mode, val_mode) = recalculation_modes(
                             force_recalc,
                             since_date,
@@ -226,65 +182,59 @@ fn handle_portfolio_request(handle: AppHandle, payload_str: &str, force_recalc: 
                         );
                         handle_portfolio_calculation(
                             handle_clone.clone(),
+                            context.clone(),
                             accounts_to_recalc,
                             snap_mode,
                             val_mode,
                         );
                     }
-                } else {
-                    error!(
-                        "ServiceContext not found in state during market data sync for {} request.",
-                        event_name
-                    );
+                    Err(e) => {
+                        if let Err(e_emit) = crate::events::emit_for_profile(
+                            &handle_clone,
+                            &context,
+                            MARKET_SYNC_ERROR,
+                            &e.to_string(),
+                        ) {
+                            error!("Failed to emit market:sync-error event: {}", e_emit);
+                        }
+                        error!("Market data sync failed: {}. Skipping portfolio calculation for this request.", e);
+                    }
                 }
-            });
-        }
-        Err(e) => {
-            error!(
-                "Failed to parse payload for {}: {}. Triggering default action.",
-                event_name, e
-            );
-            // Trigger a default action if payload parsing fails - use MarketSyncMode::None
-            let fallback_payload = PortfolioRequestPayload::builder()
-                .account_ids(None)
-                .market_sync_mode(MarketSyncMode::None)
-                .build();
-            if force_recalc {
-                emit_portfolio_trigger_recalculate(&handle, fallback_payload);
             } else {
-                emit_portfolio_trigger_update(&handle, fallback_payload);
+                // MarketSyncMode::None - skip market sync, just recalculate
+                info!("Skipping market sync (MarketSyncMode::None)");
+                let (snap_mode, val_mode) = recalculation_modes(
+                    force_recalc,
+                    since_date,
+                    user_today(parse_user_timezone_or_default(&context.get_timezone())),
+                );
+                handle_portfolio_calculation(
+                    handle_clone.clone(),
+                    context.clone(),
+                    accounts_to_recalc,
+                    snap_mode,
+                    val_mode,
+                );
             }
         }
-    }
+    });
 }
 
 // This function handles the portfolio snapshot and history calculation logic
 fn handle_portfolio_calculation(
     app_handle: AppHandle,
+    context: Arc<ServiceContext>,
     account_ids_input: Option<Vec<String>>,
     snapshot_mode: SnapshotRecalcMode,
     valuation_mode: ValuationRecalcMode,
 ) {
-    if let Err(e) = app_handle.emit(PORTFOLIO_UPDATE_START, ()) {
+    if let Err(e) =
+        crate::events::emit_for_profile(&app_handle, &context, PORTFOLIO_UPDATE_START, ())
+    {
         error!("Failed to emit {} event: {}", PORTFOLIO_UPDATE_START, e);
     }
 
     spawn(async move {
-        let context = match app_handle.state::<DatabaseRuntime>().try_context() {
-            Some(ctx) => ctx,
-            None => {
-                let err_msg = "The database is unavailable; skipping portfolio calculation.";
-                error!("{}", err_msg);
-                if let Err(e_emit) = app_handle.emit(PORTFOLIO_UPDATE_ERROR, err_msg) {
-                    error!(
-                        "Failed to emit {} event: {}",
-                        PORTFOLIO_UPDATE_ERROR, e_emit
-                    );
-                }
-                return;
-            }
-        };
-
         let account_service = context.account_service();
         let snapshot_service = context.snapshot_service();
         let valuation_service = context.valuation_service();
@@ -299,7 +249,12 @@ fn handle_portfolio_calculation(
                 Err(e) => {
                     let err_msg = format!("Failed to list non-archived accounts: {}", e);
                     error!("{}", err_msg);
-                    if let Err(e_emit) = app_handle.emit(PORTFOLIO_UPDATE_ERROR, &err_msg) {
+                    if let Err(e_emit) = crate::events::emit_for_profile(
+                        &app_handle,
+                        &context,
+                        PORTFOLIO_UPDATE_ERROR,
+                        &err_msg,
+                    ) {
                         error!(
                             "Failed to emit {} event: {}",
                             PORTFOLIO_UPDATE_ERROR, e_emit
@@ -322,7 +277,12 @@ fn handle_portfolio_calculation(
                     e
                 );
                 error!("{}", err_msg);
-                if let Err(e_emit) = app_handle.emit(PORTFOLIO_UPDATE_ERROR, &err_msg) {
+                if let Err(e_emit) = crate::events::emit_for_profile(
+                    &app_handle,
+                    &context,
+                    PORTFOLIO_UPDATE_ERROR,
+                    &err_msg,
+                ) {
                     error!(
                         "Failed to emit {} event: {}",
                         PORTFOLIO_UPDATE_ERROR, e_emit
@@ -368,7 +328,12 @@ fn handle_portfolio_calculation(
                             "Failed to calculate valuation history for account '{}': {}",
                             failure.account_id, failure.message
                         );
-                        if let Err(emit_error) = app_handle.emit(PORTFOLIO_UPDATE_ERROR, &failure) {
+                        if let Err(emit_error) = crate::events::emit_for_profile(
+                            &app_handle,
+                            &context,
+                            PORTFOLIO_UPDATE_ERROR,
+                            &failure,
+                        ) {
                             error!("Failed to emit portfolio error: {}", emit_error);
                         }
                     }
@@ -376,14 +341,21 @@ fn handle_portfolio_calculation(
                 Err(error) => {
                     let message = format!("Failed to load shared valuation facts: {}", error);
                     error!("{}", message);
-                    let _ = app_handle.emit(PORTFOLIO_UPDATE_ERROR, &message);
+                    let _ = crate::events::emit_for_profile(
+                        &app_handle,
+                        &context,
+                        PORTFOLIO_UPDATE_ERROR,
+                        &message,
+                    );
                 }
             }
         }
 
         context.health_service().clear_cache().await;
 
-        if let Err(e) = app_handle.emit(PORTFOLIO_UPDATE_COMPLETE, ()) {
+        if let Err(e) =
+            crate::events::emit_for_profile(&app_handle, &context, PORTFOLIO_UPDATE_COMPLETE, ())
+        {
             error!("Failed to emit {} event: {}", PORTFOLIO_UPDATE_COMPLETE, e);
         }
     });

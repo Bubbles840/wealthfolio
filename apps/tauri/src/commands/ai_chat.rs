@@ -2,11 +2,10 @@
 //!
 //! Uses Tauri's IPC Channel for efficient streaming of AI events.
 
-use crate::database::DatabaseRuntime;
-
+use crate::profiles::ProfileAccess;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
-use tauri::{ipc::Channel, State};
+use tauri::ipc::Channel;
 use wealthfolio_ai::{
     AiError, AiStreamEvent, ChatMessage, ChatThread, ListThreadsRequest, SendMessageRequest,
     ThreadPage,
@@ -37,9 +36,10 @@ pub struct UpdateThreadRequest {
 /// Returns Ok(()) when the stream completes successfully.
 #[tauri::command]
 pub async fn stream_ai_chat(
-    context: State<'_, DatabaseRuntime>,
+    context: ProfileAccess,
+    scope_id: uuid::Uuid,
     request: SendMessageRequest,
-    on_event: Channel<AiStreamEvent>,
+    on_event: Channel<crate::events::ProfileEvent<AiStreamEvent>>,
 ) -> CommandResult<()> {
     let context = context.context()?;
     let service = context.ai_chat_service();
@@ -48,7 +48,13 @@ pub async fn stream_ai_chat(
 
     // Stream events to the frontend via the Tauri channel
     while let Some(event) = event_stream.next().await {
-        if let Err(e) = on_event.send(event) {
+        if !context.is_active() {
+            break;
+        }
+        if let Err(e) = on_event.send(crate::events::ProfileEvent {
+            scope_id,
+            data: event,
+        }) {
             log::error!("Failed to send AI event to channel: {}", e);
             break;
         }
@@ -66,7 +72,7 @@ pub async fn stream_ai_chat(
 /// Returns a `ThreadPage` with threads, next_cursor, and has_more flag.
 #[tauri::command]
 pub async fn list_ai_threads(
-    context: State<'_, DatabaseRuntime>,
+    context: ProfileAccess,
     cursor: Option<String>,
     limit: Option<u32>,
     search: Option<String>,
@@ -85,7 +91,7 @@ pub async fn list_ai_threads(
 /// Get a single chat thread by ID.
 #[tauri::command]
 pub async fn get_ai_thread(
-    context: State<'_, DatabaseRuntime>,
+    context: ProfileAccess,
     thread_id: String,
 ) -> CommandResult<Option<ChatThread>> {
     let context = context.context()?;
@@ -97,7 +103,7 @@ pub async fn get_ai_thread(
 /// Get all messages for a chat thread.
 #[tauri::command]
 pub async fn get_ai_thread_messages(
-    context: State<'_, DatabaseRuntime>,
+    context: ProfileAccess,
     thread_id: String,
 ) -> CommandResult<Vec<ChatMessage>> {
     let context = context.context()?;
@@ -109,7 +115,7 @@ pub async fn get_ai_thread_messages(
 /// Update a chat thread's title and/or pinned status.
 #[tauri::command]
 pub async fn update_ai_thread(
-    context: State<'_, DatabaseRuntime>,
+    context: ProfileAccess,
     request: UpdateThreadRequest,
 ) -> CommandResult<ChatThread> {
     let context = context.context()?;
@@ -134,10 +140,7 @@ pub async fn update_ai_thread(
 
 /// Delete a chat thread and all its messages.
 #[tauri::command]
-pub async fn delete_ai_thread(
-    context: State<'_, DatabaseRuntime>,
-    thread_id: String,
-) -> CommandResult<()> {
+pub async fn delete_ai_thread(context: ProfileAccess, thread_id: String) -> CommandResult<()> {
     let context = context.context()?;
     let service = context.ai_chat_service();
     service.delete_thread(&thread_id).await?;
@@ -151,7 +154,7 @@ pub async fn delete_ai_thread(
 /// Add a tag to a thread.
 #[tauri::command]
 pub async fn add_ai_thread_tag(
-    _context: State<'_, DatabaseRuntime>,
+    _context: ProfileAccess,
     _thread_id: String,
     _tag: String,
 ) -> CommandResult<()> {
@@ -162,7 +165,7 @@ pub async fn add_ai_thread_tag(
 /// Remove a tag from a thread.
 #[tauri::command]
 pub async fn remove_ai_thread_tag(
-    _context: State<'_, DatabaseRuntime>,
+    _context: ProfileAccess,
     _thread_id: String,
     _tag: String,
 ) -> CommandResult<()> {
@@ -173,7 +176,7 @@ pub async fn remove_ai_thread_tag(
 /// Get all tags for a thread.
 #[tauri::command]
 pub async fn get_ai_thread_tags(
-    context: State<'_, DatabaseRuntime>,
+    context: ProfileAccess,
     thread_id: String,
 ) -> CommandResult<Vec<String>> {
     let context = context.context()?;
@@ -208,7 +211,7 @@ pub struct UpdateToolResultRequest {
 /// the frontend calls this to store metadata like created_activity_id.
 #[tauri::command]
 pub async fn update_tool_result(
-    context: State<'_, DatabaseRuntime>,
+    context: ProfileAccess,
     request: UpdateToolResultRequest,
 ) -> CommandResult<ChatMessage> {
     let context = context.context()?;
