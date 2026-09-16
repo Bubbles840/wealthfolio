@@ -63,7 +63,6 @@ fn token_lifecycle_config() -> Option<TokenLifecycleConfig> {
 pub struct ConnectService {
     binding:
         std::sync::RwLock<Option<(Arc<wealthfolio_core::profiles::ProfileRegistry>, uuid::Uuid)>>,
-    verified_token: tokio::sync::Mutex<Option<String>>,
     secret_store: Arc<dyn SecretStore>,
     settings: Arc<dyn SettingsServiceTrait>,
     token_lifecycle: Arc<TokenLifecycleState>,
@@ -77,7 +76,6 @@ impl ConnectService {
     ) -> Self {
         Self {
             binding: std::sync::RwLock::new(None),
-            verified_token: tokio::sync::Mutex::new(None),
             secret_store,
             settings,
             token_lifecycle: Arc::new(TokenLifecycleState::new()),
@@ -92,10 +90,6 @@ impl ConnectService {
         *self.binding.write().expect("binding initialization") = Some((registry, id));
     }
     async fn verify_binding(&self, token: &str) -> Result<(), String> {
-        let mut verified = self.verified_token.lock().await;
-        if verified.as_deref() == Some(token) {
-            return Ok(());
-        }
         let binding_owner = self
             .binding
             .read()
@@ -103,17 +97,15 @@ impl ConnectService {
             .clone();
         if let Some((registry, id)) = binding_owner {
             let config = token_lifecycle_config().ok_or("Connect auth is unavailable")?;
-            let binding = wealthfolio_connect::token_lifecycle::verified_profile_binding(
+            wealthfolio_connect::token_lifecycle::admit_profile_binding(
                 token,
                 &config,
                 &cloud_api_base_url().ok_or("Connect unavailable")?,
+                registry.as_ref(),
+                id,
             )
             .await?;
-            registry
-                .bind_connect(id, binding)
-                .map_err(|e| e.to_string())?;
         }
-        *verified = Some(token.to_string());
         Ok(())
     }
 
@@ -155,31 +147,37 @@ impl ConnectService {
             .map_err(|err| err.to_string())
     }
 
-    pub async fn store_session(&self, token: &str) -> Result<(), String> {
-        let binding_owner = self
+    pub async fn store_session<F, Fut>(
+        &self,
+        token: &str,
+        confirm_rebind: bool,
+        cleanup: F,
+    ) -> Result<(), String>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<(), String>>,
+    {
+        let (registry, id) = self
             .binding
             .read()
             .map_err(|_| "Profile binding unavailable")?
-            .clone();
-        let mut token = token.to_string();
-        if let Some((registry, id)) = binding_owner {
-            let config = token_lifecycle_config().ok_or("Connect auth unavailable")?;
-            let (candidate, binding) =
-                wealthfolio_connect::token_lifecycle::validate_profile_login(
-                    &token,
-                    &config,
-                    &cloud_api_base_url().ok_or("Connect unavailable")?,
-                )
-                .await?;
-            registry
-                .bind_connect(id, binding)
-                .map_err(|e| e.to_string())?;
-            token = candidate;
-        }
+            .clone()
+            .ok_or("Profile binding unavailable")?;
+        let config = token_lifecycle_config().ok_or("Connect auth unavailable")?;
         self.token_lifecycle
-            .store_session_after_restore(self.secret_store.as_ref(), self.settings.as_ref(), &token)
-            .await
-            .map_err(|err| err.to_string())
+            .store_profile_session(
+                self.secret_store.as_ref(),
+                self.settings.as_ref(),
+                registry.as_ref(),
+                id,
+                token,
+                confirm_rebind,
+                &config,
+                &cloud_api_base_url().ok_or("Connect unavailable")?,
+                cleanup,
+            )
+            .await?;
+        Ok(())
     }
 
     pub async fn clear_session_with<F, Fut>(&self, after_clear: F) -> Result<bool, String>

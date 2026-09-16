@@ -136,6 +136,23 @@ pub struct SyncApprovals {
     ready: Mutex<HashMap<String, bool>>,
     pairing: Mutex<HashMap<String, bool>>,
 }
+impl SyncApprovals {
+    pub(crate) fn clear(&self) -> Result<(), String> {
+        self.min_snapshot
+            .lock()
+            .map_err(|_| "Sync approval state unavailable")?
+            .clear();
+        self.ready
+            .lock()
+            .map_err(|_| "Sync approval state unavailable")?
+            .clear();
+        self.pairing
+            .lock()
+            .map_err(|_| "Sync approval state unavailable")?
+            .clear();
+        Ok(())
+    }
+}
 
 pub(super) fn get_min_snapshot_created_at_from_store(
     context: &ServiceContext,

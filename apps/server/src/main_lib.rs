@@ -74,14 +74,14 @@ pub struct AppState {
     pub(crate) mcp_sessions:
         Arc<rmcp::transport::streamable_http_server::session::local::LocalSessionManager>,
     pub(crate) profile_lifecycle: tokio::sync::Mutex<()>,
+    pub(crate) connect_transition: Arc<tokio::sync::RwLock<()>>,
     pub(crate) workers: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
     pub(crate) writer: write_actor::WriteHandle,
     pub(crate) writer_task: tokio::sync::Mutex<Option<write_actor::WriterTask>>,
     #[cfg(feature = "device-sync")]
     pub sync_approvals: crate::api::device_sync_engine::SyncApprovals,
     pub profile_binding:
-        std::sync::OnceLock<(Arc<wealthfolio_core::profiles::ProfileRegistry>, uuid::Uuid)>,
-    pub verified_profile_token: tokio::sync::Mutex<Option<String>>,
+        Arc<std::sync::OnceLock<(Arc<wealthfolio_core::profiles::ProfileRegistry>, uuid::Uuid)>>,
     pub backup_exports: crate::api::portable_backups::BackupExports,
     /// Domain event sink for emitting events after mutations.
     /// Note: The sink is used by services injected at construction time; this field
@@ -1033,6 +1033,7 @@ pub(crate) async fn build_profile_state(
     let device_sync_runtime = Arc::new(DeviceSyncRuntimeState::new());
     let broker_sync_running = Arc::new(AtomicBool::new(false));
     let token_lifecycle = Arc::new(TokenLifecycleState::new());
+    let profile_binding = Arc::new(std::sync::OnceLock::new());
     let now = chrono::Utc::now();
     if let Err(err) = app_sync_repository
         .prune_sync_outbox(
@@ -1102,6 +1103,7 @@ pub(crate) async fn build_profile_state(
         timezone.clone(),
         secret_store.clone(),
         token_lifecycle.clone(),
+        profile_binding.clone(),
         spending_settings_service.clone(),
         categorization_rules_service.clone(),
     )?);
@@ -1109,13 +1111,13 @@ pub(crate) async fn build_profile_state(
     let state = Arc::new(AppState {
         mcp_sessions: Arc::new(Default::default()),
         profile_lifecycle: tokio::sync::Mutex::new(()),
+        connect_transition: Arc::new(tokio::sync::RwLock::new(())),
         workers: std::sync::Mutex::new(workers),
         writer: writer.clone(),
         writer_task: tokio::sync::Mutex::new(writer_task.take()),
         #[cfg(feature="device-sync")]
         sync_approvals: Default::default(),
-        profile_binding: std::sync::OnceLock::new(),
-        verified_profile_token: tokio::sync::Mutex::new(None),
+        profile_binding,
         backup_exports: crate::api::portable_backups::BackupExports::default(),
         domain_event_sink,
         account_service,

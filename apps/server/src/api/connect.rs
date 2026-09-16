@@ -165,6 +165,8 @@ async fn create_connect_client(state: &AppState) -> ApiResult<ConnectApiClient> 
 #[serde(rename_all = "camelCase")]
 pub struct StoreSyncSessionRequest {
     pub refresh_token: String,
+    #[serde(default)]
+    pub confirm_rebind: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -361,32 +363,54 @@ async fn store_sync_session(
     axum::Extension(state): axum::Extension<Arc<AppState>>,
     Json(body): Json<StoreSyncSessionRequest>,
 ) -> ApiResult<Json<()>> {
+    let _transition = state
+        .connect_transition
+        .clone()
+        .try_write_owned()
+        .map_err(|_| {
+            ApiError::Forbidden(
+                "Profile operations are running. Wait for them to finish and try again.".into(),
+            )
+        })?;
+    let _sync_lifecycle = state.profile_lifecycle.lock().await;
     ensure_cloud_sync_enabled()?;
     let config = token_lifecycle_config()
         .ok_or_else(|| ApiError::Forbidden("Connect auth unavailable".into()))?;
-    let (token, binding) = wealthfolio_connect::token_lifecycle::validate_profile_login(
-        &body.refresh_token,
-        &config,
-        &cloud_api_base_url()?,
-    )
-    .await
-    .map_err(ApiError::Forbidden)?;
     let (registry, id) = state
         .profile_binding
         .get()
         .ok_or_else(|| ApiError::Forbidden("Profile binding unavailable".into()))?;
-    registry
-        .bind_connect(*id, binding)
-        .map_err(|e| ApiError::Forbidden(e.to_string()))?;
+    let _broker_guard = try_acquire_broker_sync_guard(&state).ok_or_else(|| {
+        ApiError::Forbidden("Broker sync is running. Wait for it to finish and try again.".into())
+    })?;
     state
         .token_lifecycle
-        .store_session_after_restore(
+        .store_profile_session(
             state.secret_store.as_ref(),
             state.settings_service.as_ref(),
-            &token,
+            registry.as_ref(),
+            *id,
+            &body.refresh_token,
+            body.confirm_rebind,
+            &config,
+            &cloud_api_base_url()?,
+            || async {
+                #[cfg(feature = "device-sync")]
+                {
+                    state.device_sync_runtime.ensure_background_stopped().await;
+                    state.device_sync_runtime.clear_flows()?;
+                    state.sync_approvals.clear()?;
+                }
+                state
+                    .app_sync_repository
+                    .clear_connect_binding_state()
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok(())
+            },
         )
         .await
-        .map_err(map_token_lifecycle_error)?;
+        .map_err(ApiError::Forbidden)?;
 
     Ok(Json(()))
 }
@@ -590,20 +614,15 @@ pub(crate) async fn mint_access_token(state: &AppState) -> ApiResult<String> {
         .profile_binding
         .get()
         .ok_or_else(|| ApiError::Forbidden("Profile binding unavailable".into()))?;
-    let mut verified = state.verified_profile_token.lock().await;
-    if verified.as_deref() != Some(&token) {
-        let binding = wealthfolio_connect::token_lifecycle::verified_profile_binding(
-            &token,
-            &config.ok_or_else(|| ApiError::Forbidden("Connect auth unavailable".into()))?,
-            &cloud_api_base_url()?,
-        )
-        .await
-        .map_err(ApiError::Forbidden)?;
-        registry
-            .bind_connect(*id, binding)
-            .map_err(|e| ApiError::Forbidden(e.to_string()))?;
-        *verified = Some(token.clone());
-    }
+    wealthfolio_connect::token_lifecycle::admit_profile_binding(
+        &token,
+        &config.ok_or_else(|| ApiError::Forbidden("Connect auth unavailable".into()))?,
+        &cloud_api_base_url()?,
+        registry.as_ref(),
+        *id,
+    )
+    .await
+    .map_err(ApiError::Forbidden)?;
     Ok(token)
 }
 
@@ -1694,7 +1713,7 @@ mod tests {
     #[cfg(feature = "device-sync")]
     #[test]
     fn connect_router_includes_device_engine_routes() {
-        let _router = router();
+        let _router: Router = router();
     }
 
     #[cfg(feature = "device-sync")]

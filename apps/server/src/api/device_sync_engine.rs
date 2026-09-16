@@ -42,6 +42,24 @@ pub struct SyncApprovals {
     ready: Mutex<HashMap<String, bool>>,
     pairing: Mutex<HashMap<String, bool>>,
 }
+impl SyncApprovals {
+    pub(crate) fn clear(&self) -> Result<(), String> {
+        self.min_snapshot
+            .lock()
+            .map_err(|_| "Sync approval state unavailable")?
+            .clear();
+        self.ready
+            .lock()
+            .map_err(|_| "Sync approval state unavailable")?
+            .clear();
+        self.pairing
+            .lock()
+            .map_err(|_| "Sync approval state unavailable")?
+            .clear();
+        Ok(())
+    }
+}
+
 const SNAPSHOT_FRESHNESS_CLOCK_SKEW_LEEWAY_SECS: i64 = 120;
 const SYNC_SOURCE_RESTORE_REQUIRED_CODE: &str = "SYNC_SOURCE_RESTORE_REQUIRED";
 

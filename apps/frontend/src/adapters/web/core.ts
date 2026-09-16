@@ -1797,10 +1797,11 @@ export const invoke = async <T>(command: string, payload?: Record<string, unknow
     }
     // Wealthfolio Connect commands
     case "store_sync_session": {
-      const { refreshToken } = payload as {
+      const { refreshToken, confirmRebind } = payload as {
         refreshToken: string;
+        confirmRebind?: boolean;
       };
-      body = JSON.stringify({ refreshToken });
+      body = JSON.stringify({ refreshToken, confirmRebind });
       break;
     }
     case "list_devices":

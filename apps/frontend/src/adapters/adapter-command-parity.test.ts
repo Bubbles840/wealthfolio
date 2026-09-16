@@ -209,6 +209,23 @@ describe("adapter command parity", () => {
     expect(missing).toEqual([]);
   });
 
+  it("preserves explicit Connect rebind confirmation in the web request", async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response("null", {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    await invoke("store_sync_session", { refreshToken: "candidate", confirmRebind: true });
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("/api/v1/connect/session");
+    expect(JSON.parse(init.body as string)).toEqual({
+      refreshToken: "candidate",
+      confirmRebind: true,
+    });
+  });
+
   it("routes allocation drilldown requests with all required filters", async () => {
     const response = new Response(JSON.stringify({ holdings: [] }), {
       status: 200,

@@ -542,6 +542,54 @@ impl ProfileRegistry {
         self.save(&mut data, next)
     }
 
+    /// Preview a server-verified identity without reserving it or changing the profile.
+    pub fn connect_rebind_required(
+        &self,
+        id: Uuid,
+        binding: &ConnectBinding,
+    ) -> ProfileResult<bool> {
+        let data = self.data()?;
+        if let Some(existing) = data.profiles.iter().find(|p| {
+            p.id != id
+                && p.connect
+                    .as_ref()
+                    .is_some_and(|c| c.issuer == binding.issuer && c.user_id == binding.user_id)
+        }) {
+            return Err(ProfileError::DuplicateIdentity(existing.id));
+        }
+        let profile = data
+            .profiles
+            .iter()
+            .find(|p| p.id == id && !self.is_deleting(id))
+            .ok_or(ProfileError::NotFound)?;
+        Ok(profile
+            .connect
+            .as_ref()
+            .is_some_and(|previous| previous != binding))
+    }
+
+    /// Called only after confirmed local cloud-state cleanup. Duplicate reservations
+    /// are checked again under the registry lock, including concurrent logins.
+    pub fn replace_connect(&self, id: Uuid, binding: ConnectBinding) -> ProfileResult<()> {
+        let mut data = self.data()?;
+        if let Some(existing) = data.profiles.iter().find(|p| {
+            p.id != id
+                && p.connect
+                    .as_ref()
+                    .is_some_and(|c| c.issuer == binding.issuer && c.user_id == binding.user_id)
+        }) {
+            return Err(ProfileError::DuplicateIdentity(existing.id));
+        }
+        let mut next = data.clone();
+        let profile = next
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == id && !self.is_deleting(id))
+            .ok_or(ProfileError::NotFound)?;
+        profile.connect = Some(binding);
+        self.save(&mut data, next)
+    }
+
     /// Checked before credentials are committed. Ordinary sign-out retains this reservation.
     pub fn bind_connect(&self, id: Uuid, binding: ConnectBinding) -> ProfileResult<()> {
         let mut data = self.data()?;
@@ -1215,6 +1263,38 @@ mod tests {
             )
             .unwrap();
     }
+    #[test]
+    fn rebind_preview_does_not_mutate_and_confirmation_keeps_account_unique() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = ProfileRegistry::open(
+            dir.path().into(),
+            dir.path().join("db"),
+            Arc::new(Secrets::default()),
+        )
+        .unwrap();
+        let a = registry.default_id().unwrap();
+        let b = registry.create("B", PROFILE_AVATARS[0]).unwrap().id;
+        let original = ConnectBinding {
+            issuer: "issuer".into(),
+            user_id: "a".into(),
+            team_id: Some("team-a".into()),
+        };
+        registry.bind_connect(a, original.clone()).unwrap();
+        assert!(!registry.connect_rebind_required(a, &original).unwrap());
+        let changed = ConnectBinding {
+            team_id: Some("team-b".into()),
+            ..original.clone()
+        };
+        assert!(registry.connect_rebind_required(a, &changed).unwrap());
+        assert_eq!(registry.profile(a).unwrap().connect, Some(original));
+        registry.replace_connect(a, changed.clone()).unwrap();
+        assert_eq!(registry.profile(a).unwrap().connect, Some(changed.clone()));
+        assert!(matches!(
+            registry.replace_connect(b, changed),
+            Err(ProfileError::DuplicateIdentity(_))
+        ));
+    }
+
     #[test]
     fn simultaneous_logins_cannot_reserve_the_same_connect_identity() {
         let dir = tempfile::tempdir().unwrap();

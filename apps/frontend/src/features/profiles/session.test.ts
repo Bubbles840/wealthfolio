@@ -9,6 +9,29 @@ describe("profile request authority", () => {
     session.revokeProfileSession();
     expect(() => session.profileScope()).toThrow("PROFILE_LOCKED");
   });
+  it("keeps the profile admitted during temporary Connect contention", async () => {
+    const session = await import("./session");
+    const grant = { profileId: "a", scopeId: "scope-a" };
+    session.installProfileSession(grant);
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce(new Response("Connect account change in progress", { status: 503 }))
+        .mockResolvedValueOnce(new Response("portfolio"))
+        .mockResolvedValueOnce(new Response("Profile locked", { status: 423 })),
+    );
+    try {
+      expect((await session.profileFetch("/api/v1/accounts")).status).toBe(503);
+      expect(session.installProfileSession(grant)).toBe(true);
+      expect(session.profileScope()).toBe("scope-a");
+      expect(await (await session.profileFetch("/api/v1/accounts")).text()).toBe("portfolio");
+      await expect(session.profileFetch("/api/v1/accounts")).rejects.toThrow("PROFILE_LOCKED");
+      expect(() => session.profileScope()).toThrow("PROFILE_LOCKED");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
   it("discards a response that arrives after lock", async () => {
     const session = await import("./session");
     session.installProfileSession({ profileId: "a", scopeId: "scope-a" });

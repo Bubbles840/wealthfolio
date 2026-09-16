@@ -332,8 +332,11 @@ export const restoreSyncSession = async (): Promise<{
   return invoke<{ accessToken: string; refreshToken: string }>("restore_sync_session");
 };
 
-export const storeSyncSession = async (refreshToken: string): Promise<void> => {
-  return invoke<void>("store_sync_session", { refreshToken });
+export const storeSyncSession = async (
+  refreshToken: string,
+  confirmRebind = false,
+): Promise<void> => {
+  return invoke<void>("store_sync_session", { refreshToken, confirmRebind });
 };
 
 export const clearSyncSession = async (): Promise<void> => {

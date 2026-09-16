@@ -73,20 +73,45 @@ where
 
 #[tauri::command]
 pub async fn store_sync_session(
-    refresh_token: Option<String>,
+    refresh_token: String,
+    confirm_rebind: Option<bool>,
     state: ProfileAccess,
 ) -> Result<(), String> {
-    let context = state.context()?;
-    match refresh_token
-        .as_deref()
-        .map(str::trim)
-        .filter(|token| !token.is_empty())
-    {
-        Some(token) => context.connect_service().store_session(token).await?,
-        None => {
-            disconnect_cloud_session(&context).await?;
-        }
+    let token = refresh_token.trim();
+    if token.is_empty() {
+        return Err("Refresh token must not be empty.".into());
     }
+    let _transition = state
+        .connect_transition
+        .clone()
+        .try_write_owned()
+        .map_err(|_| "Profile operations are running. Wait for them to finish and try again.")?;
+    let context = state.context()?;
+    let _sync_lifecycle = context.sync_lifecycle.lock().await;
+    // Reserve broker sync for the complete login transition, including cleanup.
+    let _broker_guard =
+        wealthfolio_connect::acquire_broker_sync_guard(&context.broker_sync_running())
+            .ok_or("Broker sync is running. Wait for it to finish and try again.")?;
+    context
+        .connect_service()
+        .store_session(token, confirm_rebind.unwrap_or(false), || async {
+            #[cfg(feature = "device-sync")]
+            {
+                context
+                    .device_sync_runtime()
+                    .ensure_background_stopped()
+                    .await;
+                context.device_sync_runtime().clear_flows()?;
+                context.sync_approvals.clear()?;
+            }
+            context
+                .app_sync_repository()
+                .clear_connect_binding_state()
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(())
+        })
+        .await?;
 
     Ok(())
 }

@@ -498,24 +498,29 @@ async fn command(
         }
         "get_profile_sync_identity" | "update_profile_sync_identity" => {
             let session = admitted()?;
+            let runtime = root.runtime(session.profile_id).await?;
+            let _admission = runtime
+                .connect_transition
+                .clone()
+                .try_read_owned()
+                .map_err(|_| {
+                    (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "Connect account change is in progress. Try again.".into(),
+                    )
+                })?;
             let profile = registry.profile(session.profile_id).map_err(failure)?;
             let store = registry.secret_store(&profile);
             let key = wealthfolio_core::secrets::SYNC_IDENTITY_KEY;
             if command == "get_profile_sync_identity" {
                 return Ok(Json(json!(store.get_secret(key).map_err(failure)?)));
             }
-            if let Some(identity) = body.get("identity").and_then(Value::as_str) {
-                if identity.len() > 16384
-                    || !serde_json::from_str::<Value>(identity)
-                        .map_err(failure)?
-                        .is_object()
-                {
-                    return Err(failure("Invalid sync identity"));
-                }
-                store.set_secret(key, identity).map_err(failure)?;
-            } else {
-                store.delete_secret(key).map_err(failure)?;
-            }
+            let identity = body
+                .get("identity")
+                .and_then(Value::as_str)
+                .ok_or_else(|| failure("Use device sync reset to remove enrollment."))?;
+            wealthfolio_core::secrets::update_existing_sync_identity(store.as_ref(), identity)
+                .map_err(failure)?;
             Ok(Json(Value::Null))
         }
         _ => Err((StatusCode::NOT_FOUND, "Unknown profile operation".into())),
@@ -562,6 +567,26 @@ pub async fn admit(
     };
     let selected = session.scope_id;
     let state = root.runtime(session.profile_id).await?;
+    // Hold admission through the handler. A confirmed account replacement must
+    // exclude in-flight enrollment, pairing and broker writes using the old token.
+    let _admission = if request.method() == axum::http::Method::POST
+        && request.uri().path().ends_with("/connect/session")
+    {
+        None
+    } else {
+        Some(
+            state
+                .connect_transition
+                .clone()
+                .try_read_owned()
+                .map_err(|_| {
+                    (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "Connect account change is in progress. Try again.".into(),
+                    )
+                })?,
+        )
+    };
     request.extensions_mut().insert(state);
     request.extensions_mut().insert(root.clone());
     // A download ticket belongs to this unlock, not just the browser cookie.
@@ -701,6 +726,86 @@ pub(crate) fn offline_database(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn connect_contention_is_retryable_without_revoking_profile() {
+        use axum::routing::get;
+        use tower::ServiceExt;
+        let directory = tempfile::tempdir().unwrap();
+        let config = Config {
+            listen_addr: "127.0.0.1:0".parse().unwrap(),
+            db_path: directory
+                .path()
+                .join("app.db")
+                .to_string_lossy()
+                .into_owned(),
+            cors_allow: vec![],
+            request_timeout: std::time::Duration::from_secs(30),
+            static_dir: "dist".into(),
+            addons_root: directory.path().to_string_lossy().into_owned(),
+            raw_secret_key: vec![7; 32],
+            secrets_encryption_key: [7; 32],
+            database_key: [9; 32],
+            db_encryption_required: false,
+            auth: None,
+            oidc: None,
+            mcp_enabled: false,
+            mcp_audit_enabled: false,
+            mcp_allowed_hosts: None,
+        };
+        let state = crate::build_state(&config).await.unwrap();
+        let root = WebProfiles::new(state.clone(), &config).unwrap();
+        let grant = root
+            .registry
+            .sessions
+            .issue("browser", root.registry.default_id().unwrap(), false, None)
+            .unwrap();
+        let app = Router::new()
+            .route("/financial", get(|| async { "portfolio" }))
+            .layer(axum::middleware::from_fn_with_state(root.clone(), admit))
+            .merge(router(root.clone()))
+            .layer(Extension(BackupSession("browser".into())));
+        let transition = state.connect_transition.clone().write_owned().await;
+        for path in [
+            "/financial",
+            "/profiles/get_profile_sync_identity",
+            "/profiles/update_profile_sync_identity",
+        ] {
+            let request = || {
+                Request::builder()
+                    .uri(path)
+                    .method(if path == "/financial" { "GET" } else { "POST" })
+                    .header("content-type", "application/json")
+                    .header(PROFILE_SCOPE_HEADER, grant.scope_id.to_string())
+                    .body(Body::from("{}"))
+                    .unwrap()
+            };
+            let response = app.clone().oneshot(request()).await.unwrap();
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "{path}");
+            assert!(root
+                .registry
+                .sessions
+                .admit("browser", grant.scope_id)
+                .is_ok());
+        }
+        drop(transition);
+        for path in ["/financial", "/profiles/get_profile_sync_identity"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(path)
+                        .method(if path == "/financial" { "GET" } else { "POST" })
+                        .header("content-type", "application/json")
+                        .header(PROFILE_SCOPE_HEADER, grant.scope_id.to_string())
+                        .body(Body::from("{}"))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+        }
+    }
+
     #[test]
     fn grant_mutations_reject_cross_origin_and_sibling_sites() {
         let mut headers = axum::http::HeaderMap::new();

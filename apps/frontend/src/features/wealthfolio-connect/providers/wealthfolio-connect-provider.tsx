@@ -1,3 +1,12 @@
+import { Button } from "@wealthfolio/ui";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@wealthfolio/ui/components/ui/dialog";
 import { StartupScreen } from "@/components/startup-screen";
 import {
   getCurrentDeepLinks,
@@ -209,6 +218,22 @@ function EnabledWealthfolioConnectProvider({ children }: { children: ReactNode }
     null,
   );
   const [error, setError] = useState<string | null>(null);
+  const [confirmingRebind, setConfirmingRebind] = useState(false);
+  const rebindDecisionRef = useRef<((accepted: boolean) => void) | null>(null);
+  const decideRebind = useCallback((accepted: boolean) => {
+    const resolve = rebindDecisionRef.current;
+    rebindDecisionRef.current = null;
+    setConfirmingRebind(false);
+    resolve?.(accepted);
+  }, []);
+  useEffect(
+    () => () => {
+      // Leaving/locking the profile must never accept a pending account change.
+      rebindDecisionRef.current?.(false);
+      rebindDecisionRef.current = null;
+    },
+    [],
+  );
 
   const supabaseRef = useRef<SupabaseClient | null>(null);
   const processedAuthCodesRef = useRef<Map<string, number>>(new Map());
@@ -274,12 +299,29 @@ function EnabledWealthfolioConnectProvider({ children }: { children: ReactNode }
   const storeTokens = useCallback(
     async (next: Session | null) => {
       if (next?.refresh_token) {
-        await storeSyncSession(next.refresh_token);
+        try {
+          await storeSyncSession(next.refresh_token);
+        } catch (cause) {
+          const message = cause instanceof Error ? cause.message : String(cause);
+          if (!message.includes("CONNECT_REBIND_REQUIRED")) throw cause;
+          const accepted = await new Promise<boolean>((resolve) => {
+            rebindDecisionRef.current = resolve;
+            setConfirmingRebind(true);
+          });
+          if (!accepted) return false;
+          await storeSyncSession(next.refresh_token, true);
+          // Broker links and sync state changed; discard responses from the old connection.
+          await queryClient.cancelQueries();
+          queryClient.removeQueries();
+          setUserInfo(null);
+          setPostLoginSyncRequest(null);
+        }
         // Reconnect clears the backend's read-only restore flag.
         void queryClient.invalidateQueries({ queryKey: [QueryKeys.SETTINGS] });
       } else {
         await clearSyncSession();
       }
+      return true;
     },
     [queryClient],
   );
@@ -330,7 +372,7 @@ function EnabledWealthfolioConnectProvider({ children }: { children: ReactNode }
 
           didExchangeSession = true;
           // Store tokens BEFORE setting session to avoid race condition
-          await storeTokens(data.session);
+          if (!(await storeTokens(data.session))) return;
           setSession(data.session);
           setUser(data.session.user);
           requestPostLoginSync("auth-callback", data.session);
@@ -379,8 +421,14 @@ function EnabledWealthfolioConnectProvider({ children }: { children: ReactNode }
             if (setErr || !data.session) throw setErr ?? new Error("No restored session");
             setSession(data.session);
             setUser(data.session.user);
-          } catch {
+          } catch (cause) {
             if (!current()) return;
+            const message = cause instanceof Error ? cause.message : String(cause);
+            if (message.includes("CONNECT_REBIND_REQUIRED")) {
+              // Explicit login presents the account-change confirmation; retain saved credentials.
+              setIsSessionUnavailable(false);
+              return;
+            }
             // Only authoritative absence/invalidated credentials means signed out.
             const configured = await getSyncSessionStatus()
               .then((s) => s.isConfigured)
@@ -513,7 +561,7 @@ function EnabledWealthfolioConnectProvider({ children }: { children: ReactNode }
 
           if (data.session) {
             // Store tokens BEFORE setting session to avoid race condition
-            await storeTokens(data.session);
+            if (!(await storeTokens(data.session))) return;
             setSession(data.session);
             setUser(data.session.user);
             requestPostLoginSync("email-sign-in", data.session);
@@ -554,7 +602,7 @@ function EnabledWealthfolioConnectProvider({ children }: { children: ReactNode }
           // If email confirmation is not required, user will be signed in
           if (data.session) {
             // Store tokens BEFORE setting session to avoid race condition
-            await storeTokens(data.session);
+            if (!(await storeTokens(data.session))) return;
             setSession(data.session);
             setUser(data.session.user);
             requestPostLoginSync("email-sign-up", data.session);
@@ -715,7 +763,7 @@ function EnabledWealthfolioConnectProvider({ children }: { children: ReactNode }
 
           if (data.session) {
             // Store tokens BEFORE setting session to avoid race condition
-            await storeTokens(data.session);
+            if (!(await storeTokens(data.session))) return;
             setSession(data.session);
             setUser(data.session.user);
             requestPostLoginSync("otp", data.session);
@@ -892,6 +940,25 @@ function EnabledWealthfolioConnectProvider({ children }: { children: ReactNode }
   return (
     <WealthfolioConnectContext.Provider value={value}>
       {children}
+      <Dialog
+        open={confirmingRebind}
+        onOpenChange={(open) => {
+          if (!open) decideRebind(false);
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{t("connect:rebind.title")}</DialogTitle>
+            <DialogDescription>{t("connect:rebind.description")}</DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => decideRebind(false)}>
+              {t("connect:rebind.cancel")}
+            </Button>
+            <Button onClick={() => decideRebind(true)}>{t("connect:rebind.confirm")}</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </WealthfolioConnectContext.Provider>
   );
 }

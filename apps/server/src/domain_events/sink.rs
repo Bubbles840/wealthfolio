@@ -87,6 +87,9 @@ impl WebDomainEventSink {
         timezone: Arc<RwLock<String>>,
         secret_store: Arc<dyn SecretStore>,
         token_lifecycle: Arc<TokenLifecycleState>,
+        profile_binding: Arc<
+            std::sync::OnceLock<(Arc<wealthfolio_core::profiles::ProfileRegistry>, uuid::Uuid)>,
+        >,
         spending_settings_service: Arc<wealthfolio_spending::settings::SpendingSettingsService>,
         categorization_rules_service: Arc<
             wealthfolio_spending::categorization_rules::CategorizationRulesService,
@@ -112,6 +115,7 @@ impl WebDomainEventSink {
             timezone,
             secret_store,
             token_lifecycle,
+            profile_binding,
             spending_settings_service,
             categorization_rules_service,
         });

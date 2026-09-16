@@ -101,7 +101,12 @@ async fn browsers_databases_credentials_and_stale_scopes_are_isolated() {
     );
     let entered = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
+    #[cfg(any(feature = "connect-sync", feature = "device-sync"))]
+    let cloud_routes = wealthfolio_server::api::connect::router();
+    #[cfg(not(any(feature = "connect-sync", feature = "device-sync")))]
+    let cloud_routes = Router::new();
     let router = Router::new()
+        .merge(cloud_routes)
         .route(
             "/data",
             get(|Extension(state): Extension<Arc<AppState>>| async move {
@@ -230,6 +235,24 @@ async fn browsers_databases_credentials_and_stale_scopes_are_isolated() {
         }
     });
     entered.notified().await;
+    #[cfg(any(feature = "connect-sync", feature = "device-sync"))]
+    {
+        // The real login handler must not replace an account while an admitted
+        // request can still write using the previous connection.
+        let (status, body, _) = send(
+            &router,
+            "/connect/session",
+            json!({ "refreshToken": "candidate", "confirmRebind": true }),
+            cookie_a.as_deref(),
+            Some(scope_a),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(
+            body.to_string().contains("Profile operations are running"),
+            "{body}"
+        );
+    }
     send(
         &router,
         "/profiles/lock_profile",

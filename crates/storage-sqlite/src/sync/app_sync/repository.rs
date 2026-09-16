@@ -2411,9 +2411,24 @@ impl AppSyncRepository {
             .await
     }
 
+    /// Detach broker integration state while retaining accounts and financial rows.
+    /// Only used after an explicitly confirmed Connect identity change.
+    pub async fn clear_connect_binding_state(&self) -> Result<()> {
+        self.reset_sync_session(true).await
+    }
+
     pub async fn reset_local_sync_session(&self) -> Result<()> {
+        self.reset_sync_session(false).await
+    }
+
+    async fn reset_sync_session(&self, detach_connect: bool) -> Result<()> {
         self.writer
             .exec(move |conn| {
+                if detach_connect {
+                    diesel::sql_query("DELETE FROM brokers_sync_state").execute(conn).map_err(StorageError::from)?;
+                    diesel::sql_query("UPDATE accounts SET provider=NULL, provider_account_id=NULL WHERE provider IS NOT NULL OR provider_account_id IS NOT NULL").execute(conn).map_err(StorageError::from)?;
+                    diesel::sql_query("INSERT INTO app_settings(setting_key, setting_value) VALUES ('sync_enabled','false') ON CONFLICT(setting_key) DO UPDATE SET setting_value='false'").execute(conn).map_err(StorageError::from)?;
+                }
                 let now = Utc::now().to_rfc3339();
 
                 diesel::delete(sync_outbox::table)
@@ -6067,6 +6082,56 @@ mod tests {
         assert_eq!(outbox_count, 0);
         assert_eq!(metadata_count, 0);
         assert_eq!(applied_count, 0);
+    }
+
+    #[tokio::test]
+    async fn connect_rebind_detaches_brokers_and_preserves_financial_accounts() {
+        let (pool, writer) = setup_db();
+        let repo = AppSyncRepository::new(pool.clone(), writer);
+        {
+            let mut conn = get_connection(&pool).unwrap();
+            insert_account_for_test(&mut conn, "keep").unwrap();
+            diesel::sql_query("UPDATE accounts SET provider='SNAPTRADE', provider_account_id='old-cloud-account' WHERE id='keep'").execute(&mut conn).unwrap();
+        }
+        {
+            let mut conn = get_connection(&pool).unwrap();
+            diesel::sql_query("CREATE TRIGGER fail_rebind BEFORE INSERT ON sync_cursor BEGIN SELECT RAISE(ABORT, 'test cleanup failure'); END").execute(&mut conn).unwrap();
+        }
+        assert!(repo.clear_connect_binding_state().await.is_err());
+        {
+            let mut conn = get_connection(&pool).unwrap();
+            use crate::schema::accounts;
+            let provider: Option<String> = accounts::table
+                .select(accounts::provider)
+                .filter(accounts::id.eq("keep"))
+                .first(&mut conn)
+                .unwrap();
+            assert_eq!(provider.as_deref(), Some("SNAPTRADE"));
+            diesel::sql_query("DROP TRIGGER fail_rebind")
+                .execute(&mut conn)
+                .unwrap();
+        }
+        repo.clear_connect_binding_state().await.unwrap();
+        let mut conn = get_connection(&pool).unwrap();
+        use crate::schema::accounts;
+        let (id, provider, provider_id): (String, Option<String>, Option<String>) = accounts::table
+            .select((
+                accounts::id,
+                accounts::provider,
+                accounts::provider_account_id,
+            ))
+            .filter(accounts::id.eq("keep"))
+            .first(&mut conn)
+            .unwrap();
+        assert_eq!(id, "keep");
+        assert_eq!((provider, provider_id), (None, None));
+        assert_eq!(
+            sync_outbox::table
+                .count()
+                .get_result::<i64>(&mut conn)
+                .unwrap(),
+            0
+        );
     }
 
     #[tokio::test]

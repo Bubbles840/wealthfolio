@@ -14,6 +14,37 @@ pub const SYNC_IDENTITY_KEY: &str = "sync_identity";
 /// Retired device ID entry; used only to clean up older installations.
 pub const LEGACY_SYNC_DEVICE_ID_KEY: &str = "sync_device_id";
 
+/// UI pairing updates may add keys only to the enrollment they originally read.
+/// Never recreate an identity removed by a Connect account change.
+pub fn update_existing_sync_identity(
+    store: &dyn SecretStore,
+    identity: &str,
+) -> std::result::Result<(), String> {
+    let candidate: serde_json::Value =
+        serde_json::from_str(identity).map_err(|_| "Invalid sync identity")?;
+    if identity.len() > 16384 || !candidate.is_object() {
+        return Err("Invalid sync identity".into());
+    }
+    let current = store
+        .get_secret(SYNC_IDENTITY_KEY)
+        .map_err(|e| e.to_string())?
+        .ok_or("SYNC_IDENTITY_CHANGED: Restart device sync setup.")?;
+    let current: serde_json::Value =
+        serde_json::from_str(&current).map_err(|_| "Invalid stored sync identity")?;
+    if current
+        .get("deviceId")
+        .and_then(serde_json::Value::as_str)
+        .is_none()
+        || current.get("deviceId") != candidate.get("deviceId")
+        || current.get("deviceNonce") != candidate.get("deviceNonce")
+    {
+        return Err("SYNC_IDENTITY_CHANGED: Restart device sync setup.".into());
+    }
+    store
+        .set_secret(SYNC_IDENTITY_KEY, identity)
+        .map_err(|e| e.to_string())
+}
+
 /// Format a service identifier into the canonical form expected by the
 /// platform-specific secret stores.
 pub fn format_service_id(service: &str) -> String {
@@ -111,6 +142,45 @@ pub trait SecretStore: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stale_pairing_cannot_recreate_or_overwrite_another_enrollment() {
+        #[derive(Default)]
+        struct Store(std::sync::Mutex<Option<String>>);
+        impl SecretStore for Store {
+            fn get_secret(&self, _: &str) -> Result<Option<String>> {
+                Ok(self.0.lock().unwrap().clone())
+            }
+            fn set_secret(&self, _: &str, value: &str) -> Result<()> {
+                *self.0.lock().unwrap() = Some(value.into());
+                Ok(())
+            }
+            fn delete_secret(&self, _: &str) -> Result<()> {
+                *self.0.lock().unwrap() = None;
+                Ok(())
+            }
+        }
+        let store = Store::default();
+        let old = r#"{"deviceId":"a","deviceNonce":"nonce-a","rootKey":"old"}"#;
+        assert!(update_existing_sync_identity(&store, old).is_err());
+        store
+            .set_secret(
+                SYNC_IDENTITY_KEY,
+                r#"{"deviceId":"b","deviceNonce":"nonce-b"}"#,
+            )
+            .unwrap();
+        assert!(update_existing_sync_identity(&store, old).is_err());
+        let update = r#"{"deviceId":"b","deviceNonce":"nonce-b","rootKey":"new"}"#;
+        update_existing_sync_identity(&store, update).unwrap();
+        assert_eq!(
+            store.get_secret(SYNC_IDENTITY_KEY).unwrap().as_deref(),
+            Some(update)
+        );
+        assert!(
+            update_existing_sync_identity(&store, r#"{"deviceId":"b","deviceNonce":"other"}"#)
+                .is_err()
+        );
+    }
 
     #[test]
     fn addon_secret_service_id_scopes_and_validates_keys() {

@@ -113,6 +113,7 @@ describe("syncService pairing", () => {
 
   it("confirmPairingWithBootstrap stores credentials and calls backend", async () => {
     const session: ClaimerSession = {
+      deviceId: "device-1",
       pairingId: "pair_2",
       code: "654321",
       ephemeralSecretKey: "esk",
@@ -141,7 +142,7 @@ describe("syncService pairing", () => {
 
     const result = await syncService.confirmPairingWithBootstrap(session, keyBundle);
 
-    expect(storageMocks.setE2EECredentials).toHaveBeenCalledWith("root_key", 8, {
+    expect(storageMocks.setE2EECredentials).toHaveBeenCalledWith("root_key", 8, "device-1", {
       secretKey: "esk",
       publicKey: "epk",
     });

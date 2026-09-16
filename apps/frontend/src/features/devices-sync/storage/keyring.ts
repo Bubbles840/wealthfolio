@@ -92,9 +92,12 @@ export const syncStorage = {
   /**
    * Clear only the root key (used during key rotation or re-pairing).
    */
-  async clearRootKey(): Promise<void> {
+  async clearRootKey(expectedDeviceId: string | null): Promise<void> {
     const current = await getIdentity();
     if (current) {
+      if (!expectedDeviceId || current.deviceId !== expectedDeviceId) {
+        throw new Error("Device enrollment changed. Start sync setup again.");
+      }
       const { rootKey: _, deviceSecretKey: __, devicePublicKey: ___, ...rest } = current;
       await saveIdentity(rest as SyncIdentity);
     }
@@ -115,11 +118,12 @@ export const syncStorage = {
   async setE2EECredentials(
     rootKey: string,
     keyVersion: number,
+    expectedDeviceId: string,
     keypair?: { secretKey: string; publicKey: string },
   ): Promise<void> {
     const current = await getIdentity();
-    if (!current) {
-      throw new Error("No sync identity exists. Set device nonce first.");
+    if (!current || !expectedDeviceId || current.deviceId !== expectedDeviceId) {
+      throw new Error("Device enrollment changed. Start sync setup again.");
     }
     await saveIdentity({
       ...current,

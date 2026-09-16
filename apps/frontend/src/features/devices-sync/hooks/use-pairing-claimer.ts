@@ -167,10 +167,15 @@ export function usePairingClaimer() {
     (async () => {
       try {
         // Store E2EE credentials before confirming
-        await syncStorage.setE2EECredentials(keyBundle.rootKey, keyBundle.keyVersion, {
-          secretKey: session.ephemeralSecretKey,
-          publicKey: session.ephemeralPublicKey,
-        });
+        await syncStorage.setE2EECredentials(
+          keyBundle.rootKey,
+          keyBundle.keyVersion,
+          session.deviceId,
+          {
+            secretKey: session.ephemeralSecretKey,
+            publicKey: session.ephemeralPublicKey,
+          },
+        );
 
         // Compute proof
         const proofData = `confirm:${session.pairingId}:${keyBundle.keyVersion}`;

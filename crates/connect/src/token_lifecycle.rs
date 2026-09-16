@@ -62,11 +62,24 @@ pub fn clear_restored_installation_credentials(store: &dyn SecretStore) -> Resul
     Ok(())
 }
 
+struct PendingProfileLogin {
+    supplied_token: String,
+    refreshed_token: String,
+    created: Instant,
+}
+
+impl std::fmt::Debug for PendingProfileLogin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PendingProfileLogin([redacted])")
+    }
+}
+
 #[derive(Debug)]
 pub struct TokenLifecycleState {
     cache: RwLock<Option<CachedAccessToken>>,
     refresh_lock: Mutex<()>,
     terminated: AtomicBool,
+    pending_login: std::sync::Mutex<Option<PendingProfileLogin>>,
 }
 
 impl TokenLifecycleState {
@@ -75,6 +88,7 @@ impl TokenLifecycleState {
             cache: RwLock::new(None),
             refresh_lock: Mutex::new(()),
             terminated: AtomicBool::new(false),
+            pending_login: std::sync::Mutex::new(None),
         }
     }
 
@@ -127,6 +141,147 @@ impl TokenLifecycleState {
         Ok(())
     }
 
+    /// Validate and commit an explicit login under the same lock as logout and
+    /// refresh. A confirmation challenge changes only short-lived process memory.
+    pub async fn store_profile_session<F, Fut>(
+        &self,
+        store: &dyn SecretStore,
+        settings: &dyn wealthfolio_core::settings::SettingsServiceTrait,
+        registry: &wealthfolio_core::profiles::ProfileRegistry,
+        profile_id: uuid::Uuid,
+        supplied_token: &str,
+        confirm_rebind: bool,
+        config: &TokenLifecycleConfig,
+        api_url: &str,
+        cleanup: F,
+    ) -> Result<(), String>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<(), String>>,
+    {
+        let _guard = self.refresh_lock.lock().await;
+        let candidate_token = self
+            .pending_login
+            .lock()
+            .map_err(|_| "Connect login unavailable")?
+            .as_ref()
+            .filter(|pending| {
+                pending.supplied_token == supplied_token
+                    && pending.created.elapsed() < Duration::from_secs(600)
+            })
+            .map(|pending| pending.refreshed_token.clone())
+            .unwrap_or_else(|| supplied_token.to_owned());
+        let (token, binding) = validate_profile_login(&candidate_token, config, api_url).await?;
+        self.commit_profile_login(
+            store,
+            settings,
+            registry,
+            profile_id,
+            supplied_token,
+            token,
+            binding,
+            confirm_rebind,
+            cleanup,
+        )
+        .await
+    }
+
+    // Caller holds refresh_lock; identity must have been verified by the cloud API.
+    async fn commit_profile_login<F, Fut>(
+        &self,
+        store: &dyn SecretStore,
+        settings: &dyn wealthfolio_core::settings::SettingsServiceTrait,
+        registry: &wealthfolio_core::profiles::ProfileRegistry,
+        profile_id: uuid::Uuid,
+        supplied_token: &str,
+        token: String,
+        binding: wealthfolio_core::profiles::ConnectBinding,
+        confirm_rebind: bool,
+        cleanup: F,
+    ) -> Result<(), String>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<(), String>>,
+    {
+        let changed = registry
+            .connect_rebind_required(profile_id, &binding)
+            .map_err(|e| e.to_string())?;
+        // An offline-migrated installation may have cloud state but no verified
+        // owner yet. Never attach unknown old enrollment to a new login silently.
+        let unverified_existing_state = registry
+            .profile(profile_id)
+            .map_err(|e| e.to_string())?
+            .connect
+            .is_none()
+            && [
+                SYNC_IDENTITY_KEY,
+                CLOUD_REFRESH_TOKEN_KEY,
+                CLOUD_ACCESS_TOKEN_KEY,
+                LEGACY_SYNC_DEVICE_ID_KEY,
+            ]
+            .iter()
+            .try_fold(false, |found, key| {
+                store
+                    .get_secret(key)
+                    .map(|value| found || value.is_some())
+                    .map_err(|e| e.to_string())
+            })?;
+        let changed = changed || unverified_existing_state;
+        // Preserve refresh rotation across a human confirmation delay or a failed cleanup.
+        *self
+            .pending_login
+            .lock()
+            .map_err(|_| "Connect login unavailable")? = Some(PendingProfileLogin {
+            supplied_token: supplied_token.into(),
+            refreshed_token: token.clone(),
+            created: Instant::now(),
+        });
+        if changed && !confirm_rebind {
+            return Err(
+                "CONNECT_REBIND_REQUIRED: Confirm changing this profile's Connect account or team."
+                    .into(),
+            );
+        }
+        if changed {
+            // Fail closed if cleanup is interrupted. Portfolio and encryption data
+            // are retained; no old session may resume over partially reset state.
+            settings
+                .set_setting_value("restore_reconnect_required", "true")
+                .await
+                .map_err(|e| e.to_string())?;
+            self.clear_session_locked(store)
+                .await
+                .map_err(|e| e.to_string())?;
+            cleanup().await?;
+            clear_restored_installation_credentials(store)?;
+            registry
+                .replace_connect(profile_id, binding)
+                .map_err(|e| e.to_string())?;
+        } else {
+            registry
+                .bind_connect(profile_id, binding)
+                .map_err(|e| e.to_string())?;
+            if settings
+                .requires_cloud_reconnect()
+                .map_err(|e| e.to_string())?
+            {
+                clear_restored_installation_credentials(store)?;
+            }
+        }
+        self.store_session_locked(store, &token)
+            .await
+            .map_err(|e| e.to_string())?;
+        settings
+            .set_setting_value("restore_reconnect_required", "false")
+            .await
+            .map_err(|e| e.to_string())?;
+        *self
+            .pending_login
+            .lock()
+            .map_err(|_| "Connect login unavailable")? = None;
+        Ok(())
+    }
+
     async fn store_session_locked(
         &self,
         store: &dyn SecretStore,
@@ -161,6 +316,10 @@ impl TokenLifecycleState {
         Fut: std::future::Future<Output = ()>,
     {
         let _guard = self.refresh_lock.lock().await;
+        *self
+            .pending_login
+            .lock()
+            .map_err(|_| TokenLifecycleError::Internal("Connect login unavailable".into()))? = None;
         let result = self.clear_session_locked(store).await;
         after_clear().await;
         result.map(|_| true)
@@ -499,6 +658,7 @@ mod tests {
     use super::*;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use std::sync::Arc;
+    use wealthfolio_core::profiles::{DATABASE_KEY_SECRET, PROFILE_LOCK_KEY};
 
     #[test]
     fn restored_credentials_are_cleared_without_touching_unrelated_secrets() {
@@ -508,7 +668,7 @@ mod tests {
             CLOUD_REFRESH_TOKEN_KEY,
             SYNC_IDENTITY_KEY,
             LEGACY_SYNC_DEVICE_ID_KEY,
-            "database_encryption_key",
+            DATABASE_KEY_SECRET,
         ] {
             store.set_secret(key, "synthetic secret").unwrap();
         }
@@ -521,10 +681,7 @@ mod tests {
         ] {
             assert!(store.get_secret(key).unwrap().is_none());
         }
-        assert!(store
-            .get_secret("database_encryption_key")
-            .unwrap()
-            .is_some());
+        assert!(store.get_secret(DATABASE_KEY_SECRET).unwrap().is_some());
         clear_restored_installation_credentials(&store).unwrap();
     }
 
@@ -596,6 +753,432 @@ mod tests {
         fn is_sync_enabled(&self) -> wealthfolio_core::errors::Result<bool> {
             unreachable!()
         }
+    }
+
+    struct BindingSettings {
+        required: AtomicBool,
+    }
+    #[async_trait::async_trait]
+    impl wealthfolio_core::settings::SettingsServiceTrait for BindingSettings {
+        fn get_setting_value(&self, _: &str) -> wealthfolio_core::errors::Result<Option<String>> {
+            Ok(Some(self.required.load(Ordering::SeqCst).to_string()))
+        }
+        async fn set_setting_value(
+            &self,
+            _: &str,
+            value: &str,
+        ) -> wealthfolio_core::errors::Result<()> {
+            self.required.store(value == "true", Ordering::SeqCst);
+            Ok(())
+        }
+        fn get_settings(
+            &self,
+        ) -> wealthfolio_core::errors::Result<wealthfolio_core::settings::Settings> {
+            unreachable!()
+        }
+        async fn update_settings(
+            &self,
+            _: &wealthfolio_core::settings::SettingsUpdate,
+        ) -> wealthfolio_core::errors::Result<()> {
+            unreachable!()
+        }
+        fn get_base_currency(&self) -> wealthfolio_core::errors::Result<Option<String>> {
+            unreachable!()
+        }
+        async fn update_base_currency(&self, _: &str) -> wealthfolio_core::errors::Result<()> {
+            unreachable!()
+        }
+        fn is_auto_update_check_enabled(&self) -> wealthfolio_core::errors::Result<bool> {
+            unreachable!()
+        }
+        fn is_sync_enabled(&self) -> wealthfolio_core::errors::Result<bool> {
+            unreachable!()
+        }
+    }
+
+    fn serve_binding_responses(bodies: Vec<&'static str>) -> (String, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            for body in bodies {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut request = [0; 4096];
+                let n = stream.read(&mut request).unwrap();
+                let request = String::from_utf8_lossy(&request[..n]);
+                assert!(request.contains("/api/v1/user/me"));
+                assert!(request.contains("Bearer unchanged-token"));
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+            }
+        });
+        (url, server)
+    }
+
+    #[tokio::test]
+    async fn automatic_admission_rechecks_membership_with_unchanged_access_token() {
+        let (url, server) = serve_binding_responses(vec![
+            r#"{"id":"user","team":{"id":"team-a"}}"#,
+            r#"{"id":"user","team":{"id":"team-b"}}"#,
+        ]);
+        let root = std::env::temp_dir().join(format!("wf-admission-{}", uuid::Uuid::new_v4()));
+        let store = Arc::new(MemorySecrets::default());
+        let registry = wealthfolio_core::profiles::ProfileRegistry::open(
+            root.clone(),
+            root.join("db"),
+            store.clone(),
+        )
+        .unwrap();
+        let id = registry.default_id().unwrap();
+        let original = wealthfolio_core::profiles::ConnectBinding {
+            issuer: url.clone(),
+            user_id: "user".into(),
+            team_id: Some("team-a".into()),
+        };
+        registry.bind_connect(id, original.clone()).unwrap();
+        store
+            .set_secret(SYNC_IDENTITY_KEY, "team-a enrollment")
+            .unwrap();
+        let config = TokenLifecycleConfig::new(url.clone(), "test-key".into());
+        admit_profile_binding("unchanged-token", &config, &url, &registry, id)
+            .await
+            .unwrap();
+        let result = admit_profile_binding("unchanged-token", &config, &url, &registry, id).await;
+        assert!(
+            result.unwrap_err().starts_with("CONNECT_REBIND_REQUIRED"),
+            "membership change must block cloud work even when the token is unchanged"
+        );
+        assert_eq!(registry.profile(id).unwrap().connect, Some(original));
+        assert_eq!(
+            store.get_secret(SYNC_IDENTITY_KEY).unwrap().as_deref(),
+            Some("team-a enrollment")
+        );
+        server.join().unwrap();
+        drop(registry);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn automatic_admission_does_not_bind_unknown_legacy_cloud_state() {
+        let (url, server) =
+            serve_binding_responses(vec![r#"{"id":"user","team":{"id":"current-team"}}"#]);
+        let root =
+            std::env::temp_dir().join(format!("wf-legacy-admission-{}", uuid::Uuid::new_v4()));
+        let store = Arc::new(MemorySecrets::default());
+        let registry = wealthfolio_core::profiles::ProfileRegistry::open(
+            root.clone(),
+            root.join("db"),
+            store.clone(),
+        )
+        .unwrap();
+        let id = registry.default_id().unwrap();
+        store
+            .set_secret(SYNC_IDENTITY_KEY, "unknown previous enrollment")
+            .unwrap();
+        store
+            .set_secret(CLOUD_REFRESH_TOKEN_KEY, "legacy-refresh")
+            .unwrap();
+        let config = TokenLifecycleConfig::new(url.clone(), "test-key".into());
+        let result = admit_profile_binding("unchanged-token", &config, &url, &registry, id).await;
+        assert!(
+            result.unwrap_err().starts_with("CONNECT_REBIND_REQUIRED"),
+            "legacy ownership must require explicit confirmed reconnect"
+        );
+        assert!(registry.profile(id).unwrap().connect.is_none());
+        assert_eq!(
+            store.get_secret(SYNC_IDENTITY_KEY).unwrap().as_deref(),
+            Some("unknown previous enrollment")
+        );
+        assert_eq!(
+            store
+                .get_secret(CLOUD_REFRESH_TOKEN_KEY)
+                .unwrap()
+                .as_deref(),
+            Some("legacy-refresh")
+        );
+        server.join().unwrap();
+        drop(registry);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn confirmation_reuses_rotated_candidate_and_reverifies_cloud_identity() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            for step in 0..4 {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut request = Vec::new();
+                loop {
+                    let mut chunk = [0; 4096];
+                    let n = stream.read(&mut chunk).unwrap();
+                    assert!(n > 0);
+                    request.extend_from_slice(&chunk[..n]);
+                    let text = String::from_utf8_lossy(&request);
+                    if let Some((headers, body)) = text.split_once("\r\n\r\n") {
+                        let length = headers
+                            .lines()
+                            .find_map(|line| {
+                                line.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .and_then(|v| v.trim().parse::<usize>().ok())
+                            })
+                            .unwrap_or(0);
+                        if body.len() >= length {
+                            break;
+                        }
+                    }
+                }
+                let request = String::from_utf8(request).unwrap();
+                let body = if step % 2 == 0 {
+                    assert!(request.contains(if step == 0 {
+                        "original-candidate"
+                    } else {
+                        "rotated-candidate"
+                    }));
+                    r#"{"access_token":"verified-access","refresh_token":"rotated-candidate","expires_in":3600}"#
+                } else {
+                    assert!(request.contains("/api/v1/user/me"));
+                    r#"{"id":"new-user"}"#
+                };
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+            }
+        });
+        let root =
+            std::env::temp_dir().join(format!("wf-rebinding-network-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let store = Arc::new(MemorySecrets::default());
+        let registry = wealthfolio_core::profiles::ProfileRegistry::open(
+            root.clone(),
+            root.join("db"),
+            store.clone(),
+        )
+        .unwrap();
+        let id = registry.default_id().unwrap();
+        registry
+            .bind_connect(
+                id,
+                wealthfolio_core::profiles::ConnectBinding {
+                    issuer: url.clone(),
+                    user_id: "old-user".into(),
+                    team_id: None,
+                },
+            )
+            .unwrap();
+        let config = TokenLifecycleConfig::new(url.clone(), "test-key".into());
+        let state = TokenLifecycleState::new();
+        let settings = BindingSettings {
+            required: AtomicBool::new(false),
+        };
+        assert!(state
+            .store_profile_session(
+                store.as_ref(),
+                &settings,
+                &registry,
+                id,
+                "original-candidate",
+                false,
+                &config,
+                &url,
+                || async { panic!("confirmation required") }
+            )
+            .await
+            .unwrap_err()
+            .starts_with("CONNECT_REBIND_REQUIRED"));
+        assert!(store.get_secret(CLOUD_REFRESH_TOKEN_KEY).unwrap().is_none());
+        state
+            .store_profile_session(
+                store.as_ref(),
+                &settings,
+                &registry,
+                id,
+                "original-candidate",
+                true,
+                &config,
+                &url,
+                || async { Ok(()) },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            registry.profile(id).unwrap().connect.unwrap().user_id,
+            "new-user"
+        );
+        server.join().unwrap();
+        drop(registry);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn confirmed_binding_changes_are_explicit_and_fail_closed() {
+        use wealthfolio_core::profiles::{ConnectBinding, ProfileRegistry, PROFILE_AVATARS};
+        let root = std::env::temp_dir().join(format!("wf-rebinding-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let store = Arc::new(MemorySecrets::default());
+        let registry = ProfileRegistry::open(root.clone(), root.join("db"), store.clone()).unwrap();
+        let id = registry.default_id().unwrap();
+        let other = registry.create("Other", PROFILE_AVATARS[0]).unwrap().id;
+        let old = ConnectBinding {
+            issuer: "issuer".into(),
+            user_id: "old".into(),
+            team_id: Some("team".into()),
+        };
+        let new = ConnectBinding {
+            user_id: "new".into(),
+            ..old.clone()
+        };
+        let duplicate = ConnectBinding {
+            user_id: "reserved".into(),
+            ..old.clone()
+        };
+        registry.bind_connect(id, old.clone()).unwrap();
+        registry.bind_connect(other, duplicate.clone()).unwrap();
+        let state = TokenLifecycleState::new();
+        let settings = BindingSettings {
+            required: AtomicBool::new(false),
+        };
+        for key in [
+            CLOUD_REFRESH_TOKEN_KEY,
+            SYNC_IDENTITY_KEY,
+            DATABASE_KEY_SECRET,
+            PROFILE_LOCK_KEY,
+            "unrelated",
+        ] {
+            store.set_secret(key, "original").unwrap();
+        }
+        let unbound = registry.create("Migrated", PROFILE_AVATARS[0]).unwrap().id;
+        let migrated_candidate = ConnectBinding {
+            user_id: "migrated-candidate".into(),
+            ..old.clone()
+        };
+        assert!(state
+            .commit_profile_login(
+                store.as_ref(),
+                &settings,
+                &registry,
+                unbound,
+                "candidate",
+                "rotated".into(),
+                migrated_candidate,
+                false,
+                || async { panic!("unknown old state requires confirmation") }
+            )
+            .await
+            .unwrap_err()
+            .starts_with("CONNECT_REBIND_REQUIRED"));
+        assert!(registry.profile(unbound).unwrap().connect.is_none());
+        let error = state
+            .commit_profile_login(
+                store.as_ref(),
+                &settings,
+                &registry,
+                id,
+                "candidate",
+                "rotated".into(),
+                new.clone(),
+                false,
+                || async { panic!("must not clean before confirmation") },
+            )
+            .await
+            .unwrap_err();
+        assert!(error.starts_with("CONNECT_REBIND_REQUIRED"));
+        assert_eq!(registry.profile(id).unwrap().connect, Some(old.clone()));
+        assert_eq!(
+            store
+                .get_secret(CLOUD_REFRESH_TOKEN_KEY)
+                .unwrap()
+                .as_deref(),
+            Some("original")
+        );
+        assert!(!settings.required.load(Ordering::SeqCst));
+        // Confirming never bypasses another profile's reservation.
+        assert!(state
+            .commit_profile_login(
+                store.as_ref(),
+                &settings,
+                &registry,
+                id,
+                "candidate",
+                "rotated".into(),
+                duplicate,
+                true,
+                || async { panic!("must not clean duplicate") }
+            )
+            .await
+            .unwrap_err()
+            .starts_with("CONNECT_PROFILE_EXISTS"));
+        // Same identity reconnect does not clear enrollment.
+        state
+            .commit_profile_login(
+                store.as_ref(),
+                &settings,
+                &registry,
+                id,
+                "same",
+                "same".into(),
+                old.clone(),
+                false,
+                || async { panic!("same account must retain sync") },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store.get_secret(SYNC_IDENTITY_KEY).unwrap().as_deref(),
+            Some("original")
+        );
+        // Failed cleanup cannot reactivate old credentials or bind the new user.
+        assert!(state
+            .commit_profile_login(
+                store.as_ref(),
+                &settings,
+                &registry,
+                id,
+                "candidate",
+                "rotated".into(),
+                new.clone(),
+                true,
+                || async { Err("cleanup failed".into()) }
+            )
+            .await
+            .is_err());
+        assert!(settings.required.load(Ordering::SeqCst));
+        assert!(store.get_secret(CLOUD_REFRESH_TOKEN_KEY).unwrap().is_none());
+        assert_eq!(registry.profile(id).unwrap().connect, Some(old));
+        state
+            .commit_profile_login(
+                store.as_ref(),
+                &settings,
+                &registry,
+                id,
+                "candidate",
+                "rotated".into(),
+                new.clone(),
+                true,
+                || async { Ok(()) },
+            )
+            .await
+            .unwrap();
+        assert_eq!(registry.profile(id).unwrap().connect, Some(new));
+        assert!(!settings.required.load(Ordering::SeqCst));
+        assert!(store.get_secret(SYNC_IDENTITY_KEY).unwrap().is_none());
+        for key in [DATABASE_KEY_SECRET, PROFILE_LOCK_KEY, "unrelated"] {
+            assert_eq!(store.get_secret(key).unwrap().as_deref(), Some("original"));
+        }
+        assert_eq!(
+            store
+                .get_secret(CLOUD_REFRESH_TOKEN_KEY)
+                .unwrap()
+                .as_deref(),
+            Some("rotated")
+        );
+        drop(registry);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
@@ -871,6 +1454,34 @@ pub async fn verified_profile_binding(
         user_id: user.id,
         team_id: user.team.map(|t| t.id),
     })
+}
+
+/// Verify mutable cloud membership before admitting automatic cloud work.
+/// Access-token equality does not establish team identity. Only explicit login
+/// may establish or replace a binding, after confirmation/cleanup when needed.
+/// This preflight cannot make a subsequent cloud request atomic with membership
+/// changes; that requires an expected-scope check in the cloud API contract.
+pub async fn admit_profile_binding(
+    access_token: &str,
+    config: &TokenLifecycleConfig,
+    api_url: &str,
+    registry: &wealthfolio_core::profiles::ProfileRegistry,
+    profile_id: uuid::Uuid,
+) -> Result<(), String> {
+    let binding = verified_profile_binding(access_token, config, api_url).await?;
+    let previous = registry
+        .profile(profile_id)
+        .map_err(|e| e.to_string())?
+        .connect;
+    // Also enforce the installation's one-profile-per-account reservation.
+    if previous.is_none()
+        || registry
+            .connect_rebind_required(profile_id, &binding)
+            .map_err(|e| e.to_string())?
+    {
+        return Err("CONNECT_REBIND_REQUIRED: Reconnect Wealthfolio Connect and confirm this profile's account or household before syncing.".into());
+    }
+    Ok(())
 }
 
 /// Refresh a candidate before writing anything to the destination profile.

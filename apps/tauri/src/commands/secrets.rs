@@ -123,21 +123,9 @@ pub fn update_profile_sync_identity(
     profile: ProfileAccess,
     identity: Option<String>,
 ) -> Result<(), String> {
-    let key = wealthfolio_core::secrets::SYNC_IDENTITY_KEY;
-    if let Some(json) = identity {
-        let value: serde_json::Value =
-            serde_json::from_str(&json).map_err(|_| "Invalid sync identity")?;
-        if !value.is_object() || json.len() > 16384 {
-            return Err("Invalid sync identity".into());
-        }
-        profile
-            .secret_store
-            .set_secret(key, &json)
-            .map_err(|e| e.to_string())
-    } else {
-        profile
-            .secret_store
-            .delete_secret(key)
-            .map_err(|e| e.to_string())
-    }
+    let identity = identity.ok_or("Use device sync reset to remove enrollment.")?;
+    wealthfolio_core::secrets::update_existing_sync_identity(
+        profile.secret_store.as_ref(),
+        &identity,
+    )
 }

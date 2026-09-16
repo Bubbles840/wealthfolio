@@ -62,6 +62,7 @@ describe("usePairingClaimer", () => {
 
     serviceMocks.syncService.claimPairingSession.mockResolvedValue({
       pairingId: "pair-1",
+      deviceId: "device-1",
       code: "ABC123",
       ephemeralSecretKey: "ephemeral-secret",
       ephemeralPublicKey: "ephemeral-public",

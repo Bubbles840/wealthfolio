@@ -212,6 +212,7 @@ pub struct DatabaseStartupStatus {
 pub struct DatabaseRuntime {
     pub profile_registry: Option<Arc<wealthfolio_core::profiles::ProfileRegistry>>,
     pub profile_id: uuid::Uuid,
+    pub connect_transition: Arc<tokio::sync::RwLock<()>>,
     pub secret_store: Arc<dyn SecretStore>,
     db_path: String,
     suspended: AtomicBool,
@@ -252,6 +253,7 @@ impl DatabaseRuntime {
     ) -> Self {
         Self {
             profile_registry: None,
+            connect_transition: Arc::new(tokio::sync::RwLock::new(())),
             profile_id,
             db_path: paths.database.to_string_lossy().into_owned(),
             suspended: AtomicBool::new(false),

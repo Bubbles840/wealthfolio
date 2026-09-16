@@ -393,10 +393,15 @@ class SyncService {
     const freshnessGate = minSnapshotCreatedAt ?? session.keyBundleCreatedAt;
 
     // Store credentials locally BEFORE confirming (so backend can use them for bootstrap)
-    await syncStorage.setE2EECredentials(keyBundle.rootKey, keyBundle.keyVersion, {
-      secretKey: session.ephemeralSecretKey,
-      publicKey: session.ephemeralPublicKey,
-    });
+    await syncStorage.setE2EECredentials(
+      keyBundle.rootKey,
+      keyBundle.keyVersion,
+      session.deviceId,
+      {
+        secretKey: session.ephemeralSecretKey,
+        publicKey: session.ephemeralPublicKey,
+      },
+    );
 
     const result = await confirmPairingWithBootstrapApi(
       session.pairingId,
@@ -442,6 +447,9 @@ class SyncService {
    */
   async claimPairingSession(code: string): Promise<ClaimerSession> {
     try {
+      const deviceId = await syncStorage.getDeviceId();
+      if (!deviceId)
+        throw new SyncError(SyncErrorCodes.NO_DEVICE, "Enroll this device before pairing");
       // Generate ephemeral keypair for key exchange
       const keypair = await crypto.generateEphemeralKeypair();
 
@@ -456,6 +464,7 @@ class SyncService {
       const sessionKeyB64 = await crypto.deriveSessionKey(sharedSecretB64, "pairing");
 
       return {
+        deviceId,
         pairingId: result.sessionId,
         code,
         ephemeralSecretKey: keypair.secretKey,
@@ -654,10 +663,11 @@ class SyncService {
    * Reset team sync - revokes all devices and requires new key initialization.
    */
   async resetSync(reason?: string): Promise<{ keyVersion: number }> {
+    const deviceId = await syncStorage.getDeviceId();
     const result = await resetTeamSyncApi(reason);
 
     // Clear local keys but keep device nonce and ID
-    await syncStorage.clearRootKey();
+    await syncStorage.clearRootKey(deviceId);
 
     return { keyVersion: result.keyVersion };
   }

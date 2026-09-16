@@ -1,4 +1,4 @@
-import { act, render, renderHook, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";
 import { useEffect, type ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -139,6 +139,70 @@ beforeEach(() => {
 });
 
 describe("Cloud session lifecycle", () => {
+  it("requires explicit confirmation before replacing a Connect account", async () => {
+    mocks.store.mockRejectedValueOnce(new Error("CONNECT_REBIND_REQUIRED"));
+    const { result } = await setup();
+    let login!: Promise<void>;
+    await act(async () => {
+      login = result.current.signInWithEmail("B", "password");
+    });
+    await screen.findByRole("dialog");
+    expect(mocks.store).toHaveBeenCalledTimes(1);
+    expect(result.current.isConnected).toBe(false);
+    expect(result.current.postLoginSyncRequest).toBeNull();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "connect:rebind.confirm" }));
+      await login;
+    });
+    expect(mocks.store).toHaveBeenLastCalledWith("B", true);
+    expect(result.current.user?.id).toBe("B");
+  });
+
+  it("canceling an account change preserves the current connection", async () => {
+    const { result } = await setup();
+    await act(() => result.current.signInWithEmail("A", "password"));
+    mocks.store.mockRejectedValueOnce(new Error("CONNECT_REBIND_REQUIRED"));
+    let login!: Promise<void>;
+    await act(async () => {
+      login = result.current.signInWithEmail("B", "password");
+    });
+    await screen.findByRole("dialog");
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "connect:rebind.cancel" }));
+      await login;
+    });
+    expect(mocks.store).toHaveBeenCalledTimes(2);
+    expect(mocks.clear).not.toHaveBeenCalled();
+    expect(result.current.user?.id).toBe("A");
+    expect(result.current.error).toBeNull();
+  });
+
+  it("locking or leaving a profile cancels pending confirmation", async () => {
+    mocks.store.mockRejectedValueOnce(new Error("CONNECT_REBIND_REQUIRED"));
+    const { result, unmount } = await setup();
+    let login!: Promise<void>;
+    await act(async () => {
+      login = result.current.signInWithEmail("B", "password");
+    });
+    await screen.findByRole("dialog");
+    unmount();
+    await login;
+    expect(mocks.store).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not offer to override another profile's account reservation", async () => {
+    mocks.store.mockRejectedValueOnce(new Error("CONNECT_PROFILE_EXISTS"));
+    const { result } = await setup();
+    await act(async () => {
+      await expect(result.current.signInWithEmail("B", "password")).rejects.toThrow(
+        "CONNECT_PROFILE_EXISTS",
+      );
+    });
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(result.current.isConnected).toBe(false);
+    expect(mocks.store).toHaveBeenCalledTimes(1);
+  });
+
   it("invalidates restored settings only after the backend accepts reconnection", async () => {
     const stored = deferred<void>();
     mocks.store.mockReturnValueOnce(stored.promise);
@@ -371,6 +435,15 @@ it("keeps configured credentials unavailable while offline and restores them on 
   await act(async () => result.current.retrySession());
   expect(result.current.isConnected).toBe(true);
   expect(result.current.isSessionUnavailable).toBe(false);
+});
+it("offers explicit reconnection when saved credentials need binding confirmation", async () => {
+  mocks.configured = true;
+  mocks.restore.mockRejectedValue(new Error("CONNECT_REBIND_REQUIRED"));
+  const { result } = await setup();
+  expect(result.current.isSessionUnavailable).toBe(false);
+  expect(result.current.isConnected).toBe(false);
+  expect(mocks.clear).not.toHaveBeenCalled();
+  expect(mocks.store).not.toHaveBeenCalled();
 });
 it("does not show signed-out status when the credential status check also fails", async () => {
   mocks.getStatus.mockRejectedValue(new Error("backend unavailable"));

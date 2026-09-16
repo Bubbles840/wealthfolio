@@ -185,6 +185,11 @@ impl DeviceSyncRuntimeState {
         })
     }
 
+    pub fn clear_flows(&self) -> Result<(), String> {
+        self.flows()?.clear();
+        Ok(())
+    }
+
     pub fn create_flow(
         &self,
         pairing_id: String,

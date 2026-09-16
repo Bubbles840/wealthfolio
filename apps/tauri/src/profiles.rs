@@ -298,7 +298,10 @@ impl NativeProfiles {
 /// and does not cancel work already admitted. Database operations separately enforce
 /// suspension and maintenance gates. Internal helpers should accept only the service,
 /// runtime or path they need, retaining runtime/file leases for database work.
-pub struct ProfileAccess(pub Arc<DatabaseRuntime>);
+pub struct ProfileAccess(
+    pub Arc<DatabaseRuntime>,
+    #[allow(dead_code)] Option<tokio::sync::OwnedRwLockReadGuard<()>>,
+);
 
 impl std::ops::Deref for ProfileAccess {
     type Target = Arc<DatabaseRuntime>;
@@ -344,7 +347,22 @@ impl<'de, R: tauri::Runtime> tauri::ipc::CommandArg<'de, R> for ProfileAccess {
         {
             return Err("Profile database is unavailable; open recovery first".into());
         }
-        Ok(Self(runtime))
+        let admission = if command.message.command() == "store_sync_session" {
+            None
+        } else {
+            Some(
+                runtime
+                    .connect_transition
+                    .clone()
+                    .try_read_owned()
+                    .map_err(|_| {
+                        tauri::ipc::InvokeError::from(
+                            "Connect account change is in progress. Try again.",
+                        )
+                    })?,
+            )
+        };
+        Ok(Self(runtime, admission))
     }
 }
 
