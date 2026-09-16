@@ -319,7 +319,7 @@ where
     }
 
     ports.persist_device_config(&identity, "trusted").await;
-    let token = match ports.get_access_token() {
+    let token = match ports.get_access_token().await {
         Ok(value) => value,
         Err(err) => {
             return ctx
@@ -1376,6 +1376,7 @@ mod tests {
         has_cloud_session: bool,
         session_read_results: Arc<std::sync::Mutex<VecDeque<Result<bool, String>>>>,
         sync_allowed: Result<bool, String>,
+        token_lookup_gate: Option<(Arc<Mutex<()>>, Arc<tokio::sync::Notify>)>,
         cursor: i64,
         identity: Option<SyncIdentity>,
         sync_state: Result<SyncState, String>,
@@ -1403,6 +1404,7 @@ mod tests {
                 has_cloud_session: true,
                 session_read_results: Arc::new(std::sync::Mutex::new(VecDeque::new())),
                 sync_allowed: Ok(true),
+                token_lookup_gate: None,
                 cursor: 0,
                 identity,
                 sync_state,
@@ -1664,7 +1666,11 @@ mod tests {
             self.identity.clone()
         }
 
-        fn get_access_token(&self) -> Result<String, String> {
+        async fn get_access_token(&self) -> Result<String, String> {
+            if let Some((mutex, waiting)) = &self.token_lookup_gate {
+                waiting.notify_one();
+                let _guard = mutex.lock().await;
+            }
             Ok("token".to_string())
         }
 
@@ -1853,6 +1859,30 @@ mod tests {
         tokio::time::advance(Duration::from_secs(60)).await;
         wait_for_background_stopped(&runtime, 1_000).await;
         assert!(ports.cycle_outcomes.lock().await.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn background_shutdown_cancels_pending_token_lookup() {
+        let token_mutex = Arc::new(Mutex::new(()));
+        let waiting = Arc::new(tokio::sync::Notify::new());
+        let mut ports = TestPorts::new(Some(ready_identity()), Ok(SyncState::Ready));
+        ports.token_lookup_gate = Some((token_mutex.clone(), waiting.clone()));
+        let ports = Arc::new(ports);
+        let runtime = Arc::new(DeviceSyncRuntimeState::new());
+
+        // Logout retains the token mutex until worker shutdown finishes.
+        let logout_guard = token_mutex.lock().await;
+        runtime.ensure_background_started(ports.clone()).await;
+        tokio::time::timeout(Duration::from_secs(2), waiting.notified())
+            .await
+            .expect("worker must reach token lookup");
+        let stopped =
+            tokio::time::timeout(Duration::from_secs(2), runtime.ensure_background_stopped()).await;
+        drop(logout_guard);
+        stopped.expect("shutdown must cancel lookup without waiting for the token mutex");
+        assert!(!runtime.is_background_running().await);
+        assert_eq!(Arc::strong_count(&ports), 1);
+        assert_eq!(ports.max_active_reconcile_count.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

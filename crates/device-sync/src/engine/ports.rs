@@ -178,7 +178,8 @@ pub trait CredentialStore: Send + Sync {
     fn has_cloud_session(&self) -> Result<bool, String>;
     async fn is_sync_allowed(&self) -> Result<bool, String>;
     fn get_sync_identity(&self) -> Option<SyncIdentity>;
-    fn get_access_token(&self) -> Result<String, String>;
+    // Keep token waits cancellable: logout may hold the token mutex while joining this worker.
+    async fn get_access_token(&self) -> Result<String, String>;
     async fn get_sync_state(&self) -> Result<SyncState, String>;
     async fn persist_device_config(&self, identity: &SyncIdentity, trust_state: &str);
     fn encrypt_sync_payload(

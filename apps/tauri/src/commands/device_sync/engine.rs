@@ -257,11 +257,11 @@ impl CredentialStore for TauriEnginePorts {
         })
     }
 
-    fn get_access_token(&self) -> Result<String, String> {
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current()
-                .block_on(self.context.connect_service().get_valid_access_token())
-        })
+    async fn get_access_token(&self) -> Result<String, String> {
+        self.context
+            .connect_service()
+            .get_valid_access_token()
+            .await
     }
 
     async fn get_sync_state(&self) -> Result<SyncState, String> {

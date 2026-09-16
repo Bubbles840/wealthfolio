@@ -679,12 +679,10 @@ impl CredentialStore for ServerEnginePorts {
         get_sync_identity_from_store(&self.state)
     }
 
-    fn get_access_token(&self) -> Result<String, String> {
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current()
-                .block_on(crate::api::connect::mint_access_token(&self.state))
-                .map_err(|e| e.to_string())
-        })
+    async fn get_access_token(&self) -> Result<String, String> {
+        crate::api::connect::mint_access_token(&self.state)
+            .await
+            .map_err(|e| e.to_string())
     }
 
     async fn get_sync_state(&self) -> Result<SyncState, String> {
