@@ -873,6 +873,17 @@ fn recovery_hash(code: &str) -> String {
     hex::encode(hasher.finalize())
 }
 
+fn remove_owned_path(path: &Path) -> ProfileResult<()> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {
+            fs::remove_dir_all(path).map_err(storage_error)
+        }
+        Ok(_) => fs::remove_file(path).map_err(storage_error),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(storage_error(error)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1107,6 +1118,7 @@ mod tests {
         let default = registry.profile(registry.default_id().unwrap()).unwrap();
         assert_eq!(registry.paths(&default).database, path);
         assert!(!default.lock_enabled);
+        assert!(ProfileSummary::from(&default).is_legacy);
         assert!(!registry.verify(default.id, None).unwrap());
         assert_eq!(
             registry
@@ -1118,6 +1130,7 @@ mod tests {
         );
         let second = registry.create("Second", "clay-fluff-animated").unwrap();
         let second = registry.profile(second.id).unwrap();
+        assert!(!ProfileSummary::from(&second).is_legacy);
         assert_eq!(
             registry
                 .secret_store(&second)
@@ -1640,16 +1653,5 @@ mod tests {
             std::os::unix::fs::symlink(&paths.database, &link).unwrap();
             assert!(registry.validate_import_path(a, &link).is_err());
         }
-    }
-}
-
-fn remove_owned_path(path: &Path) -> ProfileResult<()> {
-    match fs::symlink_metadata(path) {
-        Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {
-            fs::remove_dir_all(path).map_err(storage_error)
-        }
-        Ok(_) => fs::remove_file(path).map_err(storage_error),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(storage_error(error)),
     }
 }

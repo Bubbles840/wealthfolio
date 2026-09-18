@@ -21,7 +21,7 @@ revocable session, never a caller-selected database path or secret namespace.
 | [Registry](../../crates/core/src/profiles/registry.rs)                       | Persistent metadata, legacy adoption, passwords, recovery, Connect binding |
 | [Sessions](../../crates/core/src/profiles/sessions.rs)                       | Grants, revocation, idle expiry                                            |
 | [Native profiles](../../apps/tauri/src/profiles.rs)                          | IPC admission and active-profile lifecycle                                 |
-| [Native lifecycle](../../apps/tauri/src/profile_lifecycle.rs)                | OS session-lock and sleep notifications                               |
+| [Native lifecycle](../../apps/tauri/src/profile_lifecycle.rs)                | OS session-lock and sleep notifications                                    |
 | [Server profiles](../../apps/server/src/profiles.rs)                         | Per-profile runtimes, browser grants, HTTP and MCP routing                 |
 | [Profile shell](../../apps/frontend/src/features/profiles/profile-shell.tsx) | Chooser, password management, recovery, startup transitions                |
 | [Auth bridge](../../apps/frontend/src/features/profiles/auth-bridge.ts)      | OAuth ownership and scoped PKCE storage                                    |
@@ -69,6 +69,13 @@ enrollment, existing path override, and legacy secret namespace. Only that
 profile can own the legacy namespace. New profiles receive UUID-based paths and
 secret prefixes. Profile selection does not mutate process environment
 variables.
+
+The backend marks the adopted profile with `isLegacy`. Its UI preferences read
+profile-scoped localStorage first, falling back to the original key only when
+the scoped key is absent. Updates write only the scoped key; reading does not
+copy or delete old preferences. New profiles never inherit these values.
+Resetting a preference must write its default rather than remove its scoped key,
+so an old value cannot reappear.
 
 Initialization is idempotent. Missing legacy data must not attach leftover
 credentials to a new empty database. Missing registry metadata alongside
@@ -171,38 +178,41 @@ helpers receive an admitted root path rather than consulting a current profile.
 
 ### Native
 
-Registry initialization runs after Tauri setup so missing or corrupt registry files
-show a startup recovery screen instead of aborting the process. Before a registry
-is available, the shell can read startup status, retry initialization, and open the
-configured data folder. Financial commands remain unavailable. Retry preserves
-existing data and uses the registry's normal backup restoration. An explicit,
-confirmed fresh start archives unreadable registry files under
-`profile-registry-backups/<id>/` and initializes an empty registry before entering
-normal profile setup. It refuses usable registries or ownership conflicts, never
-adopts orphaned databases or credentials, and leaves existing data files in place.
-Neither recovery path reconstructs profiles from directories.
+Registry initialization runs after Tauri setup so missing or corrupt registry
+files show a startup recovery screen instead of aborting the process. Before a
+registry is available, the shell can read startup status, retry initialization,
+and open the configured data folder. Financial commands remain unavailable.
+Retry preserves existing data and uses the registry's normal backup restoration.
+An explicit, confirmed fresh start archives unreadable registry files under
+`profile-registry-backups/<id>/` and initializes an empty registry before
+entering normal profile setup. It refuses usable registries or ownership
+conflicts, never adopts orphaned databases or credentials, and leaves existing
+data files in place. Neither recovery path reconstructs profiles from
+directories.
 
 The native profile shell subscribes before its initial state read and refreshes
 on `app:ready`, session changes, and database changes. Native readiness does not
-poll. Web retains its two-second profile-session polling because it has no native
-session-change notifications; it does not use the native database gate.
+poll. Web retains its two-second profile-session polling because it has no
+native session-change notifications; it does not use the native database gate.
 
 The database gate reads status after subscribing to `database-state-changed`.
-The backend maintenance guard notifies when retry, restore, recovery, or encryption
-maintenance begins and after its flag is cleared, including failures. Its listener
-remains mounted while financial screens are hidden. The profile shell also listens
-so a database rebuild can renew a stale session even if the database gate was
-unmounted. Existing session admission and reload behavior isolate the rebuilt
-runtime; notifications do not grant access or duplicate backend state.
+The backend maintenance guard notifies when retry, restore, recovery, or
+encryption maintenance begins and after its flag is cleared, including failures.
+Its listener remains mounted while financial screens are hidden. The profile
+shell also listens so a database rebuild can renew a stale session even if the
+database gate was unmounted. Existing session admission and reload behavior
+isolate the rebuilt runtime; notifications do not grant access or duplicate
+backend state.
 
 One profile is active at a time. Lock or switch immediately covers financial UI
 and revokes admission, then stops interactive work, workers, device sync, and
-embedded MCP through the existing database lifecycle. Portfolio refresh tasks are
-owned by that profile, including their awaited calculation phase. Teardown cancels
-and joins them before closing the writer; late refresh requests are rejected.
-The writer still drains submitted transactions, and database ownership checks
-still account for blocking work. The writer and database ownership are released before another profile opens. Ownership failure leaves
-the app inaccessible rather than activating a second context.
+embedded MCP through the existing database lifecycle. Portfolio refresh tasks
+are owned by that profile, including their awaited calculation phase. Teardown
+cancels and joins them before closing the writer; late refresh requests are
+rejected. The writer still drains submitted transactions, and database ownership
+checks still account for blocking work. The writer and database ownership are
+released before another profile opens. Ownership failure leaves the app
+inaccessible rather than activating a second context.
 
 Unlock rebuilds the service context. Full document navigation clears financial
 queries, add-on/provider state, and ordinary pairing state. Critical database
@@ -210,15 +220,16 @@ maintenance remains app-owned and pinned to its original runtime. Internal file
 transfers use admitted commands; native capabilities restrict direct app-data
 access while preserving picker-granted external files.
 
-Protected sessions expire after five minutes without user activity. Switching apps,
-backgrounding, or a delayed timer tick does not immediately lock the profile.
-Desktop OS session-lock and sleep notifications revoke only password-protected
-sessions, using the protection state established by backend credential verification.
-Unprotected sessions remain open through idle, sleep, and OS lock. Polling
-and background sync do not extend the idle deadline. React renders the lock screen;
-there is no separate native overlay or cover acknowledgement protocol. Android sets
-`FLAG_SECURE` while backgrounded and clears it when the activity resumes.
-Native lifecycle behavior needs platform testing.
+Protected sessions expire after five minutes without user activity. Switching
+apps, backgrounding, or a delayed timer tick does not immediately lock the
+profile. Desktop OS session-lock and sleep notifications revoke only
+password-protected sessions, using the protection state established by backend
+credential verification. Unprotected sessions remain open through idle, sleep,
+and OS lock. Polling and background sync do not extend the idle deadline. React
+renders the lock screen; there is no separate native overlay or cover
+acknowledgement protocol. Android sets `FLAG_SECURE` while backgrounded and
+clears it when the activity resumes. Native lifecycle behavior needs platform
+testing.
 
 ### Self-hosted web
 
@@ -335,15 +346,15 @@ is `(teamId, userId)`; profiles are local and never sent as cloud identities.
 
 Automatic cloud admission re-fetches the verified user/team binding, even when
 its access token has not changed. This applies to foreground requests and queued
-broker sync. The adopted legacy profile establishes its initial binding from
-its server-verified existing session, or its first verified login if signed out,
+broker sync. The adopted legacy profile establishes its initial binding from its
+server-verified existing session, or its first verified login if signed out,
 without clearing broker links or device enrollment. The legacy format did not
 record an owner, so that first identity becomes its baseline. Unbound nonlegacy
-profiles and changed membership still require explicit reconnection.
-A user/team preflight is not atomic with the subsequent cloud request.
-Preventing membership changes between those requests requires a cloud API
-contract that checks the expected user/team on the operation itself; the current
-API does not provide that guarantee.
+profiles and changed membership still require explicit reconnection. A user/team
+preflight is not atomic with the subsequent cloud request. Preventing membership
+changes between those requests requires a cloud API contract that checks the
+expected user/team on the operation itself; the current API does not provide
+that guarantee.
 
 Temporary Connect transition contention returns HTTP 503, not the HTTP 423 used
 for revoked profile authority. The frontend retains its valid local session and
@@ -357,8 +368,8 @@ account reservations remain forbidden, including confirmed requests. Ordinary
 sign-out keeps the last binding so reconnecting the same account retains
 enrollment and switching to another account cannot reuse its keys or cursors.
 Unbound nonlegacy profiles with existing cloud credentials or enrollment still
-require confirmation and cleanup. The legacy migration exception does not
-bypass the post-restore reconnect gate or its credential cleanup.
+require confirmation and cleanup. The legacy migration exception does not bypass
+the post-restore reconnect gate or its credential cleanup.
 
 A confirmed change excludes in-flight profile commands, reserves broker sync,
 and serializes login/logout/token refresh. Pairing key writes must match the
@@ -415,9 +426,9 @@ Key invariants are independent databases and credentials, persisted cooldowns,
 recovery rotation, stale-scope rejection, pinned delayed writes, callback
 ownership, per-browser grants, and destination appearance/route handling.
 
-Release verification must also exercise real native lock/suspend and React lock-screen
-paint, OAuth background/return, external-file permissions, encrypted and
-missing-key recovery, legacy encrypted backups, and lock/switch during
+Release verification must also exercise real native lock/suspend and React
+lock-screen paint, OAuth background/return, external-file permissions, encrypted
+and missing-key recovery, legacy encrypted backups, and lock/switch during
 encryption or restore. Restoring into B must leave A's database, keys, and
 Connect credentials unchanged. Browser and unit tests alone do not establish
 these guarantees. The previously reported intermittent native white window still
@@ -430,11 +441,12 @@ Avatar IDs, crop coordinates, eye layers, and atlas paths live in
 `apps/frontend/src/features/profiles/avatar-catalog.ts`. `ProfileAvatar` renders
 that catalog; `animated={false}` preserves the artwork while disabling movement.
 Before React loads, the HTML splash displays the golden logo on a cold launch.
-After profile selection, the existing short-lived presentation hint instead shows
-the same rounded avatar frame and golden logo used by React’s loading screen, using shared CSS.
-The HTML placeholder disappears when React fills the root. Matching size and
-position avoid an avatar swap or animation restart. No React bundle or avatar
-atlas is needed for the HTML placeholder; it uses the existing logo asset.
+After profile selection, the existing short-lived presentation hint instead
+shows the same rounded avatar frame and golden logo used by React’s loading
+screen, using shared CSS. The HTML placeholder disappears when React fills the
+root. Matching size and position avoid an avatar swap or animation restart. No
+React bundle or avatar atlas is needed for the HTML placeholder; it uses the
+existing logo asset.
 
-Avatars use the original atlases directly. There are no generated avatar snapshots,
-startup markup files, or avatar-generation commands.
+Avatars use the original atlases directly. There are no generated avatar
+snapshots, startup markup files, or avatar-generation commands.

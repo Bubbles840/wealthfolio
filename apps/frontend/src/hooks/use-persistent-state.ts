@@ -1,5 +1,5 @@
 import { usePersistentState as useStoredState } from "@wealthfolio/ui";
-import { selectedProfileId } from "@/features/profiles/session";
+import { selectedProfileId, usesLegacyPreferences } from "@/features/profiles/session";
 function profilePreferencePrefix(profileId: string) {
   return `profile:${profileId}:`;
 }
@@ -17,6 +17,16 @@ export function profilePreferenceKey(key: string) {
   const profile = selectedProfileId();
   return profile ? `${profilePreferencePrefix(profile)}${key}` : key;
 }
+export function readProfilePreference(key: string): string | null {
+  return (
+    localStorage.getItem(profilePreferenceKey(key)) ??
+    (usesLegacyPreferences() ? localStorage.getItem(key) : null)
+  );
+}
 export function usePersistentState<T>(key: string, initial: T) {
-  return useStoredState(profilePreferenceKey(key), initial);
+  return useStoredState(
+    profilePreferenceKey(key),
+    initial,
+    usesLegacyPreferences() ? key : undefined,
+  );
 }

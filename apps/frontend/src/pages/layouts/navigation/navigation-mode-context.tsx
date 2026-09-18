@@ -1,4 +1,4 @@
-import { profilePreferenceKey } from "@/hooks/use-persistent-state";
+import { profilePreferenceKey, readProfilePreference } from "@/hooks/use-persistent-state";
 import { createContext, ReactNode, useCallback, useContext, useEffect, useMemo } from "react";
 import { usePersistentState } from "@/hooks/use-persistent-state";
 
@@ -45,7 +45,7 @@ function readInitialMode(): NavigationMode {
     return DEFAULT_MODE;
   }
 
-  const stored = parseStoredMode(window.localStorage.getItem(profilePreferenceKey(STORAGE_KEY)));
+  const stored = parseStoredMode(readProfilePreference(STORAGE_KEY));
   return stored ?? DEFAULT_MODE;
 }
 
@@ -55,11 +55,14 @@ export function NavigationModeProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     function handleStorage(event: StorageEvent) {
-      if (event.key !== STORAGE_KEY && event.key !== FOCUS_STORAGE_KEY) {
+      if (
+        event.key !== profilePreferenceKey(STORAGE_KEY) &&
+        event.key !== profilePreferenceKey(FOCUS_STORAGE_KEY)
+      ) {
         return;
       }
 
-      if (event.key === STORAGE_KEY) {
+      if (event.key === profilePreferenceKey(STORAGE_KEY)) {
         const nextMode = parseStoredMode(event.newValue);
         if (nextMode && nextMode !== mode) {
           setModeState(nextMode);
@@ -67,7 +70,7 @@ export function NavigationModeProvider({ children }: { children: ReactNode }) {
         return;
       }
 
-      if (event.key === FOCUS_STORAGE_KEY) {
+      if (event.key === profilePreferenceKey(FOCUS_STORAGE_KEY)) {
         const nextFocus = event.newValue === "true";
         if (nextFocus !== isFocusMode) {
           setFocusModeState(nextFocus);

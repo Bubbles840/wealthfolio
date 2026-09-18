@@ -256,7 +256,7 @@ pub async fn sync_bootstrap_snapshot_if_needed(
         .connect_service()
         .ensure_device_sync_subscription()
         .await?;
-    let identity = get_sync_identity_from_store(&context)
+    let identity = get_sync_identity_from_store(context)
         .ok_or_else(|| "No sync identity configured. Please enable sync first.".to_string())?;
     let device_id = identity
         .device_id
@@ -265,7 +265,7 @@ pub async fn sync_bootstrap_snapshot_if_needed(
     let token = get_access_token(context).await?;
     // Check in-memory first, then fall back to SQLite (survives restart)
     let raw_freshness_gate =
-        get_min_snapshot_created_at_from_store(&context, &device_id).or_else(|| {
+        get_min_snapshot_created_at_from_store(context, &device_id).or_else(|| {
             context
                 .app_sync_repository()
                 .get_min_snapshot_created_at(&device_id)
@@ -280,7 +280,7 @@ pub async fn sync_bootstrap_snapshot_if_needed(
                     "[DeviceSync] Dropping invalid min snapshot freshness gate: {}",
                     value
                 );
-                remove_min_snapshot_created_at_from_store(&context, &device_id);
+                remove_min_snapshot_created_at_from_store(context, &device_id);
                 let _ = context
                     .app_sync_repository()
                     .clear_min_snapshot_created_at(device_id.clone())
@@ -323,7 +323,7 @@ pub async fn sync_bootstrap_snapshot_if_needed(
             Some("WAIT_SNAPSHOT") | Some("BOOTSTRAP_SNAPSHOT")
         );
         if !reconcile_requires_snapshot {
-            clear_min_snapshot_created_at_from_store(&context);
+            clear_min_snapshot_created_at_from_store(context);
             return Ok(SyncBootstrapResult {
                 status: "skipped".to_string(),
                 message: "Snapshot bootstrap already completed".to_string(),
@@ -375,7 +375,7 @@ pub async fn sync_bootstrap_snapshot_if_needed(
                             .reset_and_mark_bootstrap_complete(device_id, identity.key_version)
                             .await
                             .map_err(|e| e.to_string())?;
-                        clear_min_snapshot_created_at_from_store(&context);
+                        clear_min_snapshot_created_at_from_store(context);
                         return Ok(SyncBootstrapResult {
                             status: "skipped".to_string(),
                             message,
@@ -422,7 +422,7 @@ pub async fn sync_bootstrap_snapshot_if_needed(
                         .reset_and_mark_bootstrap_complete(device_id, identity.key_version)
                         .await
                         .map_err(|e| e.to_string())?;
-                    clear_min_snapshot_created_at_from_store(&context);
+                    clear_min_snapshot_created_at_from_store(context);
                     return Ok(SyncBootstrapResult {
                         status: "skipped".to_string(),
                         message,
@@ -572,10 +572,10 @@ pub async fn sync_bootstrap_snapshot_if_needed(
         .account_ids(None)
         .market_sync_mode(MarketSyncMode::Incremental { asset_ids: None })
         .build();
-    emit_portfolio_trigger_recalculate(&handle, payload, &context);
+    emit_portfolio_trigger_recalculate(&handle, payload, context);
 
     // Clear freshness gate from both in-memory and SQLite
-    clear_min_snapshot_created_at_from_store(&context);
+    clear_min_snapshot_created_at_from_store(context);
     if let Err(err) = sync_repo.clear_min_snapshot_created_at(device_id).await {
         log::warn!(
             "[DeviceSync] Failed to clear freshness gate from SQLite: {}",

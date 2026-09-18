@@ -29,10 +29,13 @@ interface PersistentStateChangeDetail {
 export function usePersistentState<T>(
   key: string,
   initialState: T,
+  fallbackKey?: string,
 ): [T, Dispatch<SetStateAction<T>>] {
   const [state, setState] = useState<T>(() => {
     try {
-      const storedValue = window.localStorage.getItem(key);
+      const storedValue =
+        window.localStorage.getItem(key) ??
+        (fallbackKey ? window.localStorage.getItem(fallbackKey) : null);
       if (storedValue) {
         return JSON.parse(storedValue, dateReviver) as T;
       }

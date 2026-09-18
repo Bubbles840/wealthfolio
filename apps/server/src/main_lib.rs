@@ -348,7 +348,7 @@ fn open_database(config: &Config, db_path: &str) -> anyhow::Result<db::DbAccess>
 pub fn run_database_maintenance(encrypt: bool) -> anyhow::Result<()> {
     run_profile_database_maintenance(encrypt, None)
 }
-pub(crate) fn run_profile_database_maintenance(
+pub fn run_profile_database_maintenance(
     encrypt: bool,
     profile: Option<uuid::Uuid>,
 ) -> anyhow::Result<()> {

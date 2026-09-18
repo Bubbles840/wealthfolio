@@ -123,8 +123,8 @@ async fn process_event_batch(
 
     if let Some(plan) = plan_asset_classification_change(events) {
         let _ = crate::events::emit_for_profile(
-            &app_handle,
-            &context,
+            app_handle,
+            context,
             ASSET_CLASSIFICATIONS_CHANGED,
             serde_json::json!({
                 "assetIds": plan.asset_ids,
@@ -145,8 +145,8 @@ async fn process_event_batch(
 
         let total = enrichment_asset_ids.len();
         let _ = crate::events::emit_for_profile(
-            &app_handle,
-            &context,
+            app_handle,
+            context,
             ASSET_ENRICHMENT_START,
             serde_json::json!({ "total": total }),
         );
@@ -185,8 +185,8 @@ async fn process_event_batch(
 
             let completed = total_enriched + total_skipped + total_failed;
             let _ = crate::events::emit_for_profile(
-                &app_handle,
-                &context,
+                app_handle,
+                context,
                 ASSET_ENRICHMENT_PROGRESS,
                 serde_json::json!({
                     "completed": completed,
@@ -196,8 +196,8 @@ async fn process_event_batch(
         }
 
         let _ = crate::events::emit_for_profile(
-            &app_handle,
-            &context,
+            app_handle,
+            context,
             ASSET_ENRICHMENT_COMPLETE,
             serde_json::json!({
                 "enriched": total_enriched,
@@ -386,8 +386,7 @@ async fn run_portfolio_job(
         }
 
         // Emit sync start event
-        if let Err(e) =
-            crate::events::emit_for_profile(&app_handle, &context, MARKET_SYNC_START, &())
+        if let Err(e) = crate::events::emit_for_profile(app_handle, context, MARKET_SYNC_START, &())
         {
             error!("Failed to emit market:sync-start event: {}", e);
         }
@@ -424,8 +423,8 @@ async fn run_portfolio_job(
                     show_skipped_reasons: false,
                 };
                 if let Err(e) = crate::events::emit_for_profile(
-                    &app_handle,
-                    &context,
+                    app_handle,
+                    context,
                     MARKET_SYNC_COMPLETE,
                     &result_payload,
                 ) {
@@ -453,8 +452,8 @@ async fn run_portfolio_job(
             }
             Err(e) => {
                 if let Err(e_emit) = crate::events::emit_for_profile(
-                    &app_handle,
-                    &context,
+                    app_handle,
+                    context,
                     MARKET_SYNC_ERROR,
                     &e.to_string(),
                 ) {
@@ -519,7 +518,7 @@ async fn run_portfolio_calculation(
 ) {
     // Emit start event
     if let Err(e) =
-        crate::events::emit_for_profile(&app_handle, &context, PORTFOLIO_UPDATE_START, &())
+        crate::events::emit_for_profile(app_handle, context, PORTFOLIO_UPDATE_START, &())
     {
         error!("Failed to emit portfolio:update-start event: {}", e);
     }
@@ -530,8 +529,8 @@ async fn run_portfolio_calculation(
             let err_msg = format!("Failed to resolve account IDs: {}", err);
             error!("{}", err_msg);
             let _ = crate::events::emit_for_profile(
-                &app_handle,
-                &context,
+                app_handle,
+                context,
                 PORTFOLIO_UPDATE_ERROR,
                 &err_msg,
             );
@@ -554,8 +553,8 @@ async fn run_portfolio_calculation(
             );
             warn!("{}", err_msg);
             let _ = crate::events::emit_for_profile(
-                &app_handle,
-                &context,
+                app_handle,
+                context,
                 PORTFOLIO_UPDATE_ERROR,
                 &err_msg,
             );
@@ -606,8 +605,8 @@ async fn run_portfolio_calculation(
                     failure.account_id, failure.message
                 );
                 let _ = crate::events::emit_for_profile(
-                    &app_handle,
-                    &context,
+                    app_handle,
+                    context,
                     PORTFOLIO_UPDATE_ERROR,
                     &failure,
                 );
@@ -617,8 +616,8 @@ async fn run_portfolio_calculation(
             let message = format!("Failed to load shared valuation facts: {}", error);
             warn!("{}", message);
             let _ = crate::events::emit_for_profile(
-                &app_handle,
-                &context,
+                app_handle,
+                context,
                 PORTFOLIO_UPDATE_ERROR,
                 &message,
             );
@@ -628,7 +627,7 @@ async fn run_portfolio_calculation(
     context.health_service().clear_cache().await;
     // Emit completion event
     if let Err(e) =
-        crate::events::emit_for_profile(&app_handle, &context, PORTFOLIO_UPDATE_COMPLETE, &())
+        crate::events::emit_for_profile(app_handle, context, PORTFOLIO_UPDATE_COMPLETE, &())
     {
         error!("Failed to emit portfolio:update-complete event: {}", e);
     }

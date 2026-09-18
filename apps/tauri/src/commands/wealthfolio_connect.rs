@@ -279,7 +279,7 @@ async fn disconnect_cloud_session(context: &ServiceContext) -> Result<(), String
         .connect_service()
         .clear_session_with(|| async {
             #[cfg(feature = "device-sync")]
-            clear_min_snapshot_created_at_from_store(&context);
+            clear_min_snapshot_created_at_from_store(context);
             let _ = context
                 .app_sync_repository()
                 .clear_all_min_snapshot_created_at()

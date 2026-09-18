@@ -70,6 +70,16 @@ test("real A → B → A reloads, different appearance, cross-tab route reset, a
   await expect(page.locator("html")).toHaveClass(/light/);
   await expect(page.locator("body")).toHaveClass(/font-sans/);
 
+  const active = await command(context, "get_profile_state");
+  await command(
+    context,
+    "set_profile_password",
+    { proof: null, password: "mobile passphrase" },
+    active.session.scopeId,
+  );
+  await command(context, "unlock_profile", { profileId: a.id, proof: "mobile passphrase" });
+  await page.reload();
+  await ready(page, "Profile A");
   await page.setViewportSize({ width: 390, height: 844 });
   await page.getByRole("button", { name: "More options" }).click();
   await page.getByRole("button", { name: "Profile menu for Profile A" }).click();
@@ -79,9 +89,18 @@ test("real A → B → A reloads, different appearance, cross-tab route reset, a
   await expect(page.getByRole("dialog")).not.toBeVisible();
   await page.screenshot({ path: "/tmp/wealthfolio-profile-lock-mobile.png" });
   await page.getByRole("button", { name: "Profile A", exact: true }).click();
+  await page.getByLabel("Password", { exact: true }).fill("mobile passphrase");
+  await page.getByRole("button", { name: "Unlock", exact: true }).click();
   await expect(page.locator(".app-shell").first()).toBeVisible();
   await expect(page.getByRole("button", { name: "More options" })).toBeVisible();
   expect(errors).toEqual([]);
+  const unlocked = await command(context, "get_profile_state");
+  await command(
+    context,
+    "set_profile_password",
+    { proof: "mobile passphrase", password: null },
+    unlocked.session.scopeId,
+  );
 });
 
 test("incorrect password stays on the chooser and can be retried", async ({ page, context }) => {
@@ -144,9 +163,12 @@ test("profile settings keeps the avatar gallery usable on desktop and mobile", a
   await expect(save).toHaveCount(1);
   const saveBounds = await save.boundingBox();
   const galleryBounds = await gallery.boundingBox();
-  expect(saveBounds!.x).toBe(nameBounds!.x);
+  expect(saveBounds!.x).toBeGreaterThanOrEqual(galleryBounds!.x);
+  expect(saveBounds!.x + saveBounds!.width).toBeLessThanOrEqual(
+    galleryBounds!.x + galleryBounds!.width,
+  );
   expect(saveBounds!.y).toBeGreaterThan(confirmationBounds!.y + confirmationBounds!.height);
-  expect(saveBounds!.y + saveBounds!.height).toBeLessThan(galleryBounds!.y);
+  expect(saveBounds!.y).toBeGreaterThanOrEqual(galleryBounds!.y + galleryBounds!.height);
   await page.getByLabel("New password", { exact: true }).fill("a new passphrase 🔒");
   await confirmation.fill("does not match");
   await page.getByRole("button", { name: /^Save(?: changes)?$/, exact: true }).click();
@@ -199,10 +221,20 @@ test("sets, changes, and recovers a password with confirmation", async ({ page, 
     const password = ` ${flow} passphrase é🔒 `;
     await page.getByLabel("New password", { exact: true }).fill(password);
     await page.getByLabel("Re-enter password", { exact: true }).fill("mismatched password");
-    await page.getByRole("button", { name: /^Save(?: changes)?$/, exact: true }).click();
+    await page
+      .getByRole("button", {
+        name: flow === "recovery" ? "Reset password" : /^Save(?: changes)?$/,
+        exact: true,
+      })
+      .click();
     await expect(page.getByText("Passwords do not match.")).toBeVisible();
     await page.getByLabel("Re-enter password", { exact: true }).fill(password);
-    await page.getByRole("button", { name: /^Save(?: changes)?$/, exact: true }).click();
+    await page
+      .getByRole("button", {
+        name: flow === "recovery" ? "Reset password" : /^Save(?: changes)?$/,
+        exact: true,
+      })
+      .click();
     await expect(page.getByRole("heading", { name: "Save your recovery code" })).toBeVisible();
     const nextRecoveryCode = (await page.locator("code").textContent())!;
     expect(nextRecoveryCode).not.toBe(recoveryCode);

@@ -91,7 +91,7 @@ pub(crate) fn sync_identity_can_run_background(identity: &SyncIdentity) -> bool 
 }
 
 fn get_device_id_from_store(context: &ServiceContext) -> Option<String> {
-    get_sync_identity_from_store(&context).and_then(|identity| identity.device_id)
+    get_sync_identity_from_store(context).and_then(|identity| identity.device_id)
 }
 
 fn is_pairing_already_confirmed_error(err: &wealthfolio_device_sync::DeviceSyncError) -> bool {
@@ -249,9 +249,9 @@ fn pairing_bootstrap_phase(
 }
 
 async fn abort_pairing_flow_local_state(context: &Arc<ServiceContext>, pairing_id: &str) {
-    clear_pairing_overwrite_approval(&context, pairing_id);
+    clear_pairing_overwrite_approval(context, pairing_id);
 
-    let device_id = get_device_id_from_store(&context);
+    let device_id = get_device_id_from_store(context);
     if let Some(device_id) = device_id.as_deref() {
         if let Ok(token) = get_access_token(context).await {
             if let Ok(client) = create_client() {
@@ -264,7 +264,7 @@ async fn abort_pairing_flow_local_state(context: &Arc<ServiceContext>, pairing_i
                 }
             }
         }
-        remove_min_snapshot_created_at_from_store(&context, device_id);
+        remove_min_snapshot_created_at_from_store(context, device_id);
         let _ = context
             .app_sync_repository()
             .clear_min_snapshot_created_at(device_id.to_string())
@@ -287,7 +287,7 @@ async fn abort_pairing_flow_local_state(context: &Arc<ServiceContext>, pairing_i
         .app_sync_repository()
         .reset_local_sync_session()
         .await;
-    clear_min_snapshot_created_at_from_store(&context);
+    clear_min_snapshot_created_at_from_store(context);
     let _ = context
         .app_sync_repository()
         .clear_all_min_snapshot_created_at()

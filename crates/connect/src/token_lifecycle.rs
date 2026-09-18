@@ -74,6 +74,15 @@ impl std::fmt::Debug for PendingProfileLogin {
     }
 }
 
+/// Profile-owned services used to validate and commit a Connect login.
+#[derive(Clone, Copy)]
+pub struct ProfileLoginContext<'a> {
+    pub store: &'a dyn SecretStore,
+    pub settings: &'a dyn wealthfolio_core::settings::SettingsServiceTrait,
+    pub registry: &'a wealthfolio_core::profiles::ProfileRegistry,
+    pub profile_id: uuid::Uuid,
+}
+
 #[derive(Debug)]
 pub struct TokenLifecycleState {
     cache: RwLock<Option<CachedAccessToken>>,
@@ -145,10 +154,7 @@ impl TokenLifecycleState {
     /// refresh. A confirmation challenge changes only short-lived process memory.
     pub async fn store_profile_session<F, Fut>(
         &self,
-        store: &dyn SecretStore,
-        settings: &dyn wealthfolio_core::settings::SettingsServiceTrait,
-        registry: &wealthfolio_core::profiles::ProfileRegistry,
-        profile_id: uuid::Uuid,
+        context: ProfileLoginContext<'_>,
         supplied_token: &str,
         confirm_rebind: bool,
         config: &TokenLifecycleConfig,
@@ -171,12 +177,23 @@ impl TokenLifecycleState {
             })
             .map(|pending| pending.refreshed_token.clone())
             .unwrap_or_else(|| supplied_token.to_owned());
-        let (token, binding) = validate_profile_login(&candidate_token, config, api_url).await?;
+        let candidate = refresh_access_token(&candidate_token, config)
+            .await
+            .map_err(|e| e.message)?;
+        let token = candidate.refresh_token.unwrap_or(candidate_token);
+        // Rotation has already happened remotely. Retain the candidate before
+        // identity lookup or registry checks can fail, without admitting it.
+        *self
+            .pending_login
+            .lock()
+            .map_err(|_| "Connect login unavailable")? = Some(PendingProfileLogin {
+            supplied_token: supplied_token.into(),
+            refreshed_token: token.clone(),
+            created: Instant::now(),
+        });
+        let binding = verified_profile_binding(&candidate.access_token, config, api_url).await?;
         self.commit_profile_login(
-            store,
-            settings,
-            registry,
-            profile_id,
+            context,
             supplied_token,
             token,
             binding,
@@ -189,10 +206,7 @@ impl TokenLifecycleState {
     // Caller holds refresh_lock; identity must have been verified by the cloud API.
     async fn commit_profile_login<F, Fut>(
         &self,
-        store: &dyn SecretStore,
-        settings: &dyn wealthfolio_core::settings::SettingsServiceTrait,
-        registry: &wealthfolio_core::profiles::ProfileRegistry,
-        profile_id: uuid::Uuid,
+        context: ProfileLoginContext<'_>,
         supplied_token: &str,
         token: String,
         binding: wealthfolio_core::profiles::ConnectBinding,
@@ -203,6 +217,12 @@ impl TokenLifecycleState {
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = Result<(), String>>,
     {
+        let ProfileLoginContext {
+            store,
+            settings,
+            registry,
+            profile_id,
+        } = context;
         let changed = registry
             .connect_rebind_required(profile_id, &binding)
             .map_err(|e| e.to_string())?;
@@ -655,6 +675,58 @@ impl RefreshRequestError {
     }
 }
 
+/// Verify the server-reported user/team with the configured issuer. No JWT
+/// payload or caller-supplied email is accepted as an identity assertion.
+pub async fn verified_profile_binding(
+    access_token: &str,
+    config: &TokenLifecycleConfig,
+    api_url: &str,
+) -> Result<wealthfolio_core::profiles::ConnectBinding, String> {
+    let user = crate::ConnectApiClient::new(api_url, access_token)
+        .map_err(|e| e.to_string())?
+        .get_user_info()
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(wealthfolio_core::profiles::ConnectBinding {
+        issuer: config.auth_url.clone(),
+        user_id: user.id,
+        team_id: user.team.map(|t| t.id),
+    })
+}
+
+/// Verify mutable cloud membership before admitting automatic cloud work.
+/// Access-token equality does not establish team identity. A legacy profile's
+/// existing session may establish its initial binding; replacing a binding
+/// requires explicit login and confirmation/cleanup.
+/// This preflight cannot make a subsequent cloud request atomic with membership
+/// changes; that requires an expected-scope check in the cloud API contract.
+pub async fn admit_profile_binding(
+    access_token: &str,
+    config: &TokenLifecycleConfig,
+    api_url: &str,
+    registry: &wealthfolio_core::profiles::ProfileRegistry,
+    profile_id: uuid::Uuid,
+) -> Result<(), String> {
+    let binding = verified_profile_binding(access_token, config, api_url).await?;
+    let profile = registry.profile(profile_id).map_err(|e| e.to_string())?;
+    if profile.connect.is_none() && profile.legacy_database.is_some() {
+        // The server has verified the inherited session. Bind atomically so
+        // duplicate-account reservations and concurrent bindings stay enforced.
+        return registry
+            .bind_connect(profile_id, binding)
+            .map_err(|e| e.to_string());
+    }
+    // Also enforce the installation's one-profile-per-account reservation.
+    if profile.connect.is_none()
+        || registry
+            .connect_rebind_required(profile_id, &binding)
+            .map_err(|e| e.to_string())?
+    {
+        return Err("CONNECT_REBIND_REQUIRED: Reconnect Wealthfolio Connect and confirm this profile's account or household before syncing.".into());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1020,10 +1092,12 @@ mod tests {
         settings.required.store(true, Ordering::SeqCst);
         assert!(state
             .commit_profile_login(
-                store.as_ref(),
-                &settings,
-                &registry,
-                id,
+                ProfileLoginContext {
+                    store: store.as_ref(),
+                    settings: &settings,
+                    registry: &registry,
+                    profile_id: id
+                },
                 "candidate",
                 "rotated".into(),
                 binding.clone(),
@@ -1039,10 +1113,12 @@ mod tests {
         for _ in 0..2 {
             state
                 .commit_profile_login(
-                    store.as_ref(),
-                    &settings,
-                    &registry,
-                    id,
+                    ProfileLoginContext {
+                        store: store.as_ref(),
+                        settings: &settings,
+                        registry: &registry,
+                        profile_id: id,
+                    },
                     "candidate",
                     "rotated".into(),
                     binding.clone(),
@@ -1060,10 +1136,12 @@ mod tests {
         };
         assert!(state
             .commit_profile_login(
-                store.as_ref(),
-                &settings,
-                &registry,
-                id,
+                ProfileLoginContext {
+                    store: store.as_ref(),
+                    settings: &settings,
+                    registry: &registry,
+                    profile_id: id
+                },
                 "other",
                 "other-rotated".into(),
                 changed,
@@ -1089,6 +1167,15 @@ mod tests {
 
     #[tokio::test]
     async fn confirmation_reuses_rotated_candidate_and_reverifies_cloud_identity() {
+        retry_rotated_candidate(false).await;
+    }
+
+    #[tokio::test]
+    async fn failed_identity_lookup_retains_rotated_candidate_for_retry() {
+        retry_rotated_candidate(true).await;
+    }
+
+    async fn retry_rotated_candidate(identity_unavailable: bool) {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
@@ -1120,6 +1207,11 @@ mod tests {
                     }
                 }
                 let request = String::from_utf8(request).unwrap();
+                if step == 1 && identity_unavailable {
+                    // An invalid response fails identity decoding after successful rotation.
+                    write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}").unwrap();
+                    continue;
+                }
                 let body = if step % 2 == 0 {
                     assert!(request.contains(if step == 0 {
                         "original-candidate"
@@ -1160,28 +1252,35 @@ mod tests {
         let settings = BindingSettings {
             required: AtomicBool::new(false),
         };
-        assert!(state
+        let error = state
             .store_profile_session(
-                store.as_ref(),
-                &settings,
-                &registry,
-                id,
+                ProfileLoginContext {
+                    store: store.as_ref(),
+                    settings: &settings,
+                    registry: &registry,
+                    profile_id: id,
+                },
                 "original-candidate",
                 false,
                 &config,
                 &url,
-                || async { panic!("confirmation required") }
+                || async { panic!("confirmation required") },
             )
             .await
-            .unwrap_err()
-            .starts_with("CONNECT_REBIND_REQUIRED"));
+            .unwrap_err();
+        assert_eq!(
+            error.starts_with("CONNECT_REBIND_REQUIRED"),
+            !identity_unavailable
+        );
         assert!(store.get_secret(CLOUD_REFRESH_TOKEN_KEY).unwrap().is_none());
         state
             .store_profile_session(
-                store.as_ref(),
-                &settings,
-                &registry,
-                id,
+                ProfileLoginContext {
+                    store: store.as_ref(),
+                    settings: &settings,
+                    registry: &registry,
+                    profile_id: id,
+                },
                 "original-candidate",
                 true,
                 &config,
@@ -1243,10 +1342,12 @@ mod tests {
         };
         assert!(state
             .commit_profile_login(
-                store.as_ref(),
-                &settings,
-                &registry,
-                unbound,
+                ProfileLoginContext {
+                    store: store.as_ref(),
+                    settings: &settings,
+                    registry: &registry,
+                    profile_id: unbound
+                },
                 "candidate",
                 "rotated".into(),
                 migrated_candidate,
@@ -1259,10 +1360,12 @@ mod tests {
         assert!(registry.profile(unbound).unwrap().connect.is_none());
         let error = state
             .commit_profile_login(
-                store.as_ref(),
-                &settings,
-                &registry,
-                id,
+                ProfileLoginContext {
+                    store: store.as_ref(),
+                    settings: &settings,
+                    registry: &registry,
+                    profile_id: id,
+                },
                 "candidate",
                 "rotated".into(),
                 new.clone(),
@@ -1284,10 +1387,12 @@ mod tests {
         // Confirming never bypasses another profile's reservation.
         assert!(state
             .commit_profile_login(
-                store.as_ref(),
-                &settings,
-                &registry,
-                id,
+                ProfileLoginContext {
+                    store: store.as_ref(),
+                    settings: &settings,
+                    registry: &registry,
+                    profile_id: id
+                },
                 "candidate",
                 "rotated".into(),
                 duplicate,
@@ -1300,10 +1405,12 @@ mod tests {
         // Same identity reconnect does not clear enrollment.
         state
             .commit_profile_login(
-                store.as_ref(),
-                &settings,
-                &registry,
-                id,
+                ProfileLoginContext {
+                    store: store.as_ref(),
+                    settings: &settings,
+                    registry: &registry,
+                    profile_id: id,
+                },
                 "same",
                 "same".into(),
                 old.clone(),
@@ -1319,10 +1426,12 @@ mod tests {
         // Failed cleanup cannot reactivate old credentials or bind the new user.
         assert!(state
             .commit_profile_login(
-                store.as_ref(),
-                &settings,
-                &registry,
-                id,
+                ProfileLoginContext {
+                    store: store.as_ref(),
+                    settings: &settings,
+                    registry: &registry,
+                    profile_id: id
+                },
                 "candidate",
                 "rotated".into(),
                 new.clone(),
@@ -1336,10 +1445,12 @@ mod tests {
         assert_eq!(registry.profile(id).unwrap().connect, Some(old));
         state
             .commit_profile_login(
-                store.as_ref(),
-                &settings,
-                &registry,
-                id,
+                ProfileLoginContext {
+                    store: store.as_ref(),
+                    settings: &settings,
+                    registry: &registry,
+                    profile_id: id,
+                },
                 "candidate",
                 "rotated".into(),
                 new.clone(),
@@ -1619,74 +1730,4 @@ mod tests {
         );
         assert!(state.is_session_configured(store.as_ref()).unwrap());
     }
-}
-
-/// Verify the server-reported user/team with the configured issuer. No JWT
-/// payload or caller-supplied email is accepted as an identity assertion.
-pub async fn verified_profile_binding(
-    access_token: &str,
-    config: &TokenLifecycleConfig,
-    api_url: &str,
-) -> Result<wealthfolio_core::profiles::ConnectBinding, String> {
-    let user = crate::ConnectApiClient::new(api_url, access_token)
-        .map_err(|e| e.to_string())?
-        .get_user_info()
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(wealthfolio_core::profiles::ConnectBinding {
-        issuer: config.auth_url.clone(),
-        user_id: user.id,
-        team_id: user.team.map(|t| t.id),
-    })
-}
-
-/// Verify mutable cloud membership before admitting automatic cloud work.
-/// Access-token equality does not establish team identity. A legacy profile's
-/// existing session may establish its initial binding; replacing a binding
-/// requires explicit login and confirmation/cleanup.
-/// This preflight cannot make a subsequent cloud request atomic with membership
-/// changes; that requires an expected-scope check in the cloud API contract.
-pub async fn admit_profile_binding(
-    access_token: &str,
-    config: &TokenLifecycleConfig,
-    api_url: &str,
-    registry: &wealthfolio_core::profiles::ProfileRegistry,
-    profile_id: uuid::Uuid,
-) -> Result<(), String> {
-    let binding = verified_profile_binding(access_token, config, api_url).await?;
-    let profile = registry.profile(profile_id).map_err(|e| e.to_string())?;
-    if profile.connect.is_none() && profile.legacy_database.is_some() {
-        // The server has verified the inherited session. Bind atomically so
-        // duplicate-account reservations and concurrent bindings stay enforced.
-        return registry
-            .bind_connect(profile_id, binding)
-            .map_err(|e| e.to_string());
-    }
-    // Also enforce the installation's one-profile-per-account reservation.
-    if profile.connect.is_none()
-        || registry
-            .connect_rebind_required(profile_id, &binding)
-            .map_err(|e| e.to_string())?
-    {
-        return Err("CONNECT_REBIND_REQUIRED: Reconnect Wealthfolio Connect and confirm this profile's account or household before syncing.".into());
-    }
-    Ok(())
-}
-
-/// Refresh a candidate before writing anything to the destination profile.
-pub async fn validate_profile_login(
-    refresh_token: &str,
-    config: &TokenLifecycleConfig,
-    api_url: &str,
-) -> Result<(String, wealthfolio_core::profiles::ConnectBinding), String> {
-    let candidate = refresh_access_token(refresh_token, config)
-        .await
-        .map_err(|e| e.message)?;
-    let binding = verified_profile_binding(&candidate.access_token, config, api_url).await?;
-    Ok((
-        candidate
-            .refresh_token
-            .unwrap_or_else(|| refresh_token.to_string()),
-        binding,
-    ))
 }

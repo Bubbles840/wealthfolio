@@ -246,6 +246,9 @@ impl WebProfiles {
             return Ok(runtime.clone());
         }
         let paths = self.registry.paths(&profile);
+        if profile.legacy_database.is_some() && !paths.database.is_file() {
+            return Err(failure("The legacy profile database is missing. Restore its file before opening this profile; existing credentials were preserved."));
+        }
         let mut config = self.config.clone();
         config.db_path = paths.database.to_string_lossy().into_owned();
         if profile.legacy_database.is_none() {

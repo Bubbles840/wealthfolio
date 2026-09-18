@@ -969,7 +969,7 @@ it("refreshes native admission after database maintenance while content is cover
   const replacement = { profileId: "a", scopeId: "rebuilt" };
   mocks.command.mockResolvedValue({ ...unlocked, session: replacement });
   await act(async () => mocks.databaseChanged());
-  expect(mocks.admitted).toHaveBeenLastCalledWith(replacement);
+  expect(mocks.admitted).toHaveBeenLastCalledWith(replacement, undefined);
   expect(screen.getByText("Private portfolio")).toBeInTheDocument();
 });
 

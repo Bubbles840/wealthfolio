@@ -6,6 +6,7 @@ export interface ProfileSummary {
   name: string;
   avatarId: string;
   lockEnabled: boolean;
+  isLegacy?: boolean;
 }
 export interface ProfileState {
   profiles: ProfileSummary[];

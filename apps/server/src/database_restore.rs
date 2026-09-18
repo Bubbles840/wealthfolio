@@ -10,7 +10,7 @@ pub fn run_database_restore(
 ) -> anyhow::Result<()> {
     run_profile_database_restore(path, password, confirmed, None)
 }
-pub(crate) fn run_profile_database_restore(
+pub fn run_profile_database_restore(
     path: &Path,
     password: Option<&str>,
     confirmed: bool,

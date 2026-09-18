@@ -6,14 +6,14 @@ export interface ProfileSession {
   profileId: string;
   scopeId: string;
 }
-let admitted: Readonly<ProfileSession> | undefined;
+let admitted: Readonly<ProfileSession & { isLegacy: boolean }> | undefined;
 let revoked = false;
 let deferReload = false;
 export function deferProfileReload(value: boolean) {
   deferReload = value;
   deferApplicationReload(value);
 }
-export function installProfileSession(session: ProfileSession) {
+export function installProfileSession(session: ProfileSession, isLegacy = false) {
   if (deferReload) return false;
   if ((admitted && admitted.scopeId !== session.scopeId) || (revoked && !admitted)) {
     revokeProfileSession();
@@ -21,7 +21,7 @@ export function installProfileSession(session: ProfileSession) {
     return false;
   }
   if (revoked) return false;
-  admitted = Object.freeze({ ...session });
+  admitted = Object.freeze({ ...session, isLegacy });
   return true;
 }
 export function profileScope(): string {
@@ -47,6 +47,10 @@ export async function profileFetch(
   if (response.status === 423) revokeProfileSession();
   profileScope();
   return response;
+}
+
+export function usesLegacyPreferences(): boolean {
+  return admitted?.isLegacy === true;
 }
 
 export function selectedProfileId(): string | undefined {

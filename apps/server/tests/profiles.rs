@@ -533,3 +533,40 @@ async fn delete_profile_closes_runtime_and_supports_empty_installation() {
         .unwrap();
     assert!(reopened.runtime(new.id).await.is_ok());
 }
+
+#[tokio::test]
+async fn missing_adopted_legacy_database_is_not_recreated_with_retained_credentials() {
+    use wealthfolio_core::secrets::CLOUD_REFRESH_TOKEN_KEY;
+    let dir = tempfile::tempdir().unwrap();
+    let config = test_config(dir.path());
+    let database = std::path::PathBuf::from(&config.db_path);
+    // Registry adoption depends only on existence; runtime must fail before opening SQLite.
+    std::fs::write(&database, b"legacy database").unwrap();
+    let root = WebProfiles::open(&config).await.unwrap();
+    let id = root.registry.default_id().unwrap();
+    let profile = root.registry.profile(id).unwrap();
+    assert!(profile.legacy_database.is_some());
+    root.registry
+        .secret_store(&profile)
+        .set_secret(CLOUD_REFRESH_TOKEN_KEY, "preserved-token")
+        .unwrap();
+    drop(root);
+    std::fs::remove_file(&database).unwrap();
+    let reopened = WebProfiles::open(&config).await.unwrap();
+    let error = reopened
+        .runtime(id)
+        .await
+        .err()
+        .expect("missing legacy DB must fail");
+    assert!(error.1.contains("legacy profile database is missing"));
+    assert!(!database.exists());
+    assert_eq!(
+        reopened
+            .registry
+            .secret_store(&profile)
+            .get_secret(CLOUD_REFRESH_TOKEN_KEY)
+            .unwrap()
+            .as_deref(),
+        Some("preserved-token")
+    );
+}

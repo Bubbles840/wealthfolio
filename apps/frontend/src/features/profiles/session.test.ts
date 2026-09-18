@@ -92,3 +92,12 @@ it("routes cross-tab profile changes to the dashboard", async () => {
   expect(() => session.profileScope()).toThrow("PROFILE_LOCKED");
   vi.doUnmock("@/lib/reload-application");
 });
+
+it("enables legacy preference fallback only with backend legacy metadata", async () => {
+  vi.resetModules();
+  const session = await import("./session");
+  expect(session.usesLegacyPreferences()).toBe(false);
+  const grant = { profileId: "adopted", scopeId: "scope" };
+  session.installProfileSession(grant, true);
+  expect(session.usesLegacyPreferences()).toBe(true);
+});

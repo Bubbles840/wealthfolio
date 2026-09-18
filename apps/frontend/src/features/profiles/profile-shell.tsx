@@ -146,7 +146,7 @@ export function ProfileShell({ children }: { children: ReactNode }) {
         } else if (next.session) {
           const profile = next.profiles.find((p) => p.id === next.session?.profileId);
           if (profile) rememberOpeningProfile(profile);
-          if (!installProfileSession(next.session)) return;
+          if (!installProfileSession(next.session, profile?.isLegacy)) return;
           currentProfile.current = profile;
           setState(next);
           setCovered(false);

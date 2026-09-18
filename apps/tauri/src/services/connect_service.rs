@@ -166,10 +166,12 @@ impl ConnectService {
         let config = token_lifecycle_config().ok_or("Connect auth unavailable")?;
         self.token_lifecycle
             .store_profile_session(
-                self.secret_store.as_ref(),
-                self.settings.as_ref(),
-                registry.as_ref(),
-                id,
+                wealthfolio_connect::token_lifecycle::ProfileLoginContext {
+                    store: self.secret_store.as_ref(),
+                    settings: self.settings.as_ref(),
+                    registry: registry.as_ref(),
+                    profile_id: id,
+                },
                 token,
                 confirm_rebind,
                 &config,

@@ -245,7 +245,7 @@ async fn get_save_up_overview(
 }
 
 async fn preview_save_up_overview(
-    State(state): State<Arc<AppState>>,
+    axum::Extension(state): axum::Extension<Arc<AppState>>,
     Json(input): Json<SaveUpInput>,
 ) -> ApiResult<Json<SaveUpOverview>> {
     let as_of = user_today(parse_user_timezone_or_default(

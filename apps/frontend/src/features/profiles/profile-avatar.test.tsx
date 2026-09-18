@@ -8,7 +8,7 @@ describe("profile avatars", () => {
   it("renders every backend avatar ID using existing current assets", () => {
     const source = readFileSync(resolve("../../crates/core/src/profiles/mod.rs"), "utf8");
     const catalog = source.split("pub const PROFILE_AVATARS: &[&str] = &[")[1].split("];")[0];
-    const defaultId = source.match(/pub const DEFAULT_PROFILE_AVATAR: &str = "([^"]+)"/)![1];
+    const defaultId = /pub const DEFAULT_PROFILE_AVATAR: &str = "([^"]+)"/.exec(source)![1];
     expect(defaultId).toBe(DEFAULT_PROFILE_AVATAR);
     const ids = [defaultId, ...[...catalog.matchAll(/"([^"]+)"/g)].map((match) => match[1])];
     expect([...ids].sort()).toEqual([...PROFILE_AVATARS].sort());

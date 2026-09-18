@@ -386,10 +386,12 @@ async fn store_sync_session(
     state
         .token_lifecycle
         .store_profile_session(
-            state.secret_store.as_ref(),
-            state.settings_service.as_ref(),
-            registry.as_ref(),
-            *id,
+            wealthfolio_connect::token_lifecycle::ProfileLoginContext {
+                store: state.secret_store.as_ref(),
+                settings: state.settings_service.as_ref(),
+                registry: registry.as_ref(),
+                profile_id: *id,
+            },
             &body.refresh_token,
             body.confirm_rebind,
             &config,
@@ -541,7 +543,7 @@ async fn disconnect_cloud_session(state: &AppState) -> Result<(), String> {
         .token_lifecycle
         .clear_session_with(state.secret_store.as_ref(), || async {
             #[cfg(feature = "device-sync")]
-            device_sync_engine::clear_min_snapshot_created_at_from_store(&state);
+            device_sync_engine::clear_min_snapshot_created_at_from_store(state);
             let _ = state
                 .app_sync_repository
                 .clear_all_min_snapshot_created_at()

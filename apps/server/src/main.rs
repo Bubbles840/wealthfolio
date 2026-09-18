@@ -1,23 +1,7 @@
-mod ai_environment;
-mod api;
-mod auth;
-mod config;
-mod database_restore;
-mod domain_events;
-mod error;
-mod events;
-mod features;
-mod main_lib;
-mod mcp;
-mod models;
-mod oidc;
-mod profiles;
-mod scheduler;
-mod secrets;
-mod static_files;
-
-use config::Config;
-use main_lib::init_tracing;
+use wealthfolio_server::{
+    api, config::Config, database_restore, init_tracing, run_profile_database_maintenance,
+    static_files,
+};
 
 /// Offline database maintenance, run with the server stopped.
 ///
@@ -73,9 +57,7 @@ fn run_maintenance_cli(args: &[String]) -> Option<anyhow::Result<()>> {
         )));
     }
     init_tracing();
-    Some(main_lib::run_profile_database_maintenance(
-        encrypt, selected,
-    ))
+    Some(run_profile_database_maintenance(encrypt, selected))
 }
 
 fn run_restore_cli(args: &[String], profile: Option<uuid::Uuid>) -> anyhow::Result<()> {

@@ -322,7 +322,7 @@ fn pairing_bootstrap_phase(
 }
 
 async fn abort_pairing_flow_local_state(state: &Arc<AppState>, pairing_id: &str) {
-    clear_pairing_overwrite_approval(&state, pairing_id);
+    clear_pairing_overwrite_approval(state, pairing_id);
 
     let device_id = get_sync_identity_from_store(state).and_then(|identity| identity.device_id);
     if let Some(device_id) = device_id.as_deref() {
@@ -336,7 +336,7 @@ async fn abort_pairing_flow_local_state(state: &Arc<AppState>, pairing_id: &str)
                 );
             }
         }
-        remove_min_snapshot_created_at_from_store(&state, device_id);
+        remove_min_snapshot_created_at_from_store(state, device_id);
         let _ = state
             .app_sync_repository
             .clear_min_snapshot_created_at(device_id.to_string())
@@ -356,7 +356,7 @@ async fn abort_pairing_flow_local_state(state: &Arc<AppState>, pairing_id: &str)
         );
     }
     let _ = state.app_sync_repository.reset_local_sync_session().await;
-    clear_min_snapshot_created_at_from_store(&state);
+    clear_min_snapshot_created_at_from_store(state);
     let _ = state
         .app_sync_repository
         .clear_all_min_snapshot_created_at()
@@ -813,7 +813,7 @@ pub async fn get_bootstrap_overwrite_check(
     };
     if !bootstrap_required {
         if let Some(device_id) = device_id.as_deref() {
-            clear_ready_state_overwrite_approval(&state, device_id);
+            clear_ready_state_overwrite_approval(state, device_id);
         }
         return Ok(SyncBootstrapOverwriteCheckResult {
             bootstrap_required,
@@ -824,7 +824,7 @@ pub async fn get_bootstrap_overwrite_check(
     }
 
     if let Some(device_id) = device_id.as_deref() {
-        if has_ready_state_overwrite_approval(&state, device_id) {
+        if has_ready_state_overwrite_approval(state, device_id) {
             return Ok(SyncBootstrapOverwriteCheckResult {
                 bootstrap_required,
                 has_local_data: false,

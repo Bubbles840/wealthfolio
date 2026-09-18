@@ -186,7 +186,7 @@ pub(crate) async fn perform_broker_sync_with_guard(
         Ok(client) => client,
         Err(err) => {
             if let Some(app_handle) = app {
-                emit_broker_sync_error(app_handle, &context, &err);
+                emit_broker_sync_error(app_handle, context, &err);
             }
             return Err(err);
         }

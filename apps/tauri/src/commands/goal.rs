@@ -238,7 +238,7 @@ pub async fn get_save_up_overview(
 #[tauri::command]
 pub async fn preview_save_up_overview(
     input: SaveUpInput,
-    state: State<'_, DatabaseRuntime>,
+    state: ProfileAccess,
 ) -> Result<SaveUpOverview, String> {
     let context = state.context()?;
     let as_of = user_today(parse_user_timezone_or_default(&context.get_timezone()));

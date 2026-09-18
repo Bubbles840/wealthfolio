@@ -118,6 +118,7 @@ pub struct ProfileSummary {
     pub name: String,
     pub avatar_id: String,
     pub lock_enabled: bool,
+    pub is_legacy: bool,
 }
 
 impl From<&Profile> for ProfileSummary {
@@ -127,6 +128,7 @@ impl From<&Profile> for ProfileSummary {
             name: profile.name.clone(),
             avatar_id: profile.avatar_id.clone(),
             lock_enabled: profile.lock_enabled,
+            is_legacy: profile.legacy_database.is_some(),
         }
     }
 }
