@@ -1,5 +1,6 @@
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
+import { PROFILE_AVATAR_GROUPS } from "./avatar-catalog";
 import { ProfileAvatarPicker } from "./profile-avatar-picker";
 
 describe("ProfileAvatarPicker", () => {
@@ -9,7 +10,11 @@ describe("ProfileAvatarPicker", () => {
     expect(screen.getByRole("button", { name: "All" }).getAttribute("aria-pressed")).toBe("true");
     fireEvent.click(screen.getByRole("button", { name: "3D" }));
     expect(onChange).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: "clay artist animated" }));
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: `3D avatar ${PROFILE_AVATAR_GROUPS.find((group) => group.name === "3D")!.avatars.indexOf("clay-artist-animated") + 1}`,
+      }),
+    );
     expect(onChange).toHaveBeenCalledWith("clay-artist-animated");
   });
 
@@ -25,7 +30,11 @@ describe("ProfileAvatarPicker", () => {
     fireEvent.click(screen.getByRole("button", { name: style }));
     const avatars = within(screen.getByRole("group", { name: `${style} avatars` }));
     expect(avatars.getAllByRole("button")).toHaveLength(8);
-    fireEvent.click(avatars.getByRole("button", { name: added.replaceAll("-", " ") }));
+    fireEvent.click(
+      avatars.getByRole("button", {
+        name: `${style} avatar ${PROFILE_AVATAR_GROUPS.find((group) => group.name === style)!.avatars.indexOf(added) + 1}`,
+      }),
+    );
     expect(onChange).toHaveBeenCalledWith(added);
   });
 });

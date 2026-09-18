@@ -38,3 +38,34 @@ it("requires fresh proof for a protected profile", () => {
   fireEvent.click(button);
   expect(onDelete).toHaveBeenCalledWith("Personal", "a long password");
 });
+it("shows a readable credential error beside the password and clears it when editing", () => {
+  render(
+    <DeleteProfileDialog
+      profile={{ ...profile, lockEnabled: true }}
+      error="PROFILE_PASSWORD_INVALID: The password or recovery code is incorrect."
+      onClose={vi.fn()}
+      onDelete={vi.fn()}
+    />,
+  );
+  const input = screen.getByLabelText("Current password or recovery code");
+  expect(input).toHaveAttribute("aria-invalid", "true");
+  expect(input).toHaveAccessibleDescription(
+    "The password or recovery code is incorrect. Please try again.",
+  );
+  expect(screen.queryByText(/PROFILE_PASSWORD_INVALID/)).not.toBeInTheDocument();
+  fireEvent.change(input, { target: { value: "corrected password" } });
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+});
+it.each([
+  ["PROFILE_COOLDOWN: Try again in 30 seconds.", "Too many attempts. Try again in 30 seconds."],
+  [
+    "PROFILE_UNAVAILABLE: internal database path",
+    "We couldn’t delete this profile. Please try again.",
+  ],
+])("makes deletion errors readable: %s", (error, message) => {
+  render(
+    <DeleteProfileDialog profile={profile} error={error} onClose={vi.fn()} onDelete={vi.fn()} />,
+  );
+  expect(screen.getByRole("alert")).toHaveTextContent(message);
+  expect(screen.queryByText(/PROFILE_/)).not.toBeInTheDocument();
+});

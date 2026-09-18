@@ -1,3 +1,4 @@
+import { useTranslation } from "react-i18next";
 import { cn } from "@/lib/utils";
 import {
   Button,
@@ -13,6 +14,7 @@ import { ProfileAvatar } from "./profile-avatar";
 import { useProfile } from "./profile-context";
 
 export function ProfileMenu({ collapsed = false }: { collapsed?: boolean }) {
+  const { t } = useTranslation("common");
   const context = useProfile();
   if (!context?.profile) return null;
   const { profile, manageProfile, lockProfile, switchProfile } = context;
@@ -24,18 +26,20 @@ export function ProfileMenu({ collapsed = false }: { collapsed?: boolean }) {
           type="button"
           variant="ghost"
           className={cn(
-            "h-12 min-w-0 gap-3 py-0",
+            "group h-12 min-w-0 gap-3 !overflow-visible py-0 hover:bg-transparent",
             collapsed
               ? "w-12 shrink-0 rounded-full p-0 has-[>svg]:px-0"
               : "w-full justify-start rounded-lg px-2 has-[>svg]:px-2",
           )}
-          aria-label={`Profile menu for ${profile.name}`}
+          aria-label={t("profiles.menuLabel", { name: profile.name })}
           title={profile.name}
         >
-          <ProfileAvatar
-            id={profile.avatarId}
-            className="mx-0 size-8 shrink-0 rounded-full object-contain [&_.profile-abstract-sculpture]:scale-90"
-          />
+          <span className="profile-lock-avatar profile-sidebar-avatar shrink-0 transition-[filter] group-hover:drop-shadow-[0_0_7px_#c09a5bb3] dark:group-hover:drop-shadow-[0_0_8px_#e2bd75b3]">
+            <ProfileAvatar
+              id={profile.avatarId}
+              className="mx-0 size-6 rounded-full object-contain [&_.profile-abstract-sculpture]:scale-90"
+            />
+          </span>
           {!collapsed && (
             <>
               <span className="min-w-0 flex-1 truncate text-left">{profile.name}</span>
@@ -52,16 +56,16 @@ export function ProfileMenu({ collapsed = false }: { collapsed?: boolean }) {
         <DropdownMenuSeparator />
         <DropdownMenuItem className="h-11 gap-3 rounded-lg px-3" onSelect={manageProfile}>
           <Icons.User className="size-4" />
-          Profile settings
+          {t("profiles.settings")}
         </DropdownMenuItem>
         <DropdownMenuItem className="h-11 gap-3 rounded-lg px-3" onSelect={switchProfile}>
           <Icons.Users className="size-4" />
-          Switch profile
+          {t("profiles.switch")}
         </DropdownMenuItem>
         <DropdownMenuSeparator />
         <DropdownMenuItem className="h-11 gap-3 rounded-lg px-3" onSelect={lockProfile}>
           <Icons.Lock className="size-4" />
-          Lock Wealthfolio
+          {t("profiles.lock")}
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>

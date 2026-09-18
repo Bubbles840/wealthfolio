@@ -112,6 +112,45 @@ it("does not expose a protected profile while startup authorization is pending",
   fireEvent.click(screen.getByRole("button", { name: "Hide password" }));
   expect(screen.getByLabelText("Password")).toHaveAttribute("type", "password");
 });
+it("prompts for the existing password when a migrated profile has a stale unlocked hint", async () => {
+  mocks.command.mockImplementation(async (command: string, input?: { proof?: string }) => {
+    if (command === "unlock_profile") {
+      if (!input?.proof) throw new Error("PROFILE_LOCKED: Unlock this profile to continue.");
+      if (input.proof === "wrong password") throw new Error("PROFILE_PASSWORD_INVALID: incorrect");
+      return unlocked.session;
+    }
+    return { ...unlocked, session: null };
+  });
+  mount();
+  fireEvent.click(await screen.findByRole("button", { name: "Personal" }));
+  const password = await screen.findByLabelText("Password");
+  expect(screen.queryByText("Private portfolio")).not.toBeInTheDocument();
+  expect(mocks.reload).not.toHaveBeenCalled();
+  // The poll restores the stale registry hint before the user submits their password.
+  await waitFor(
+    () =>
+      expect(
+        mocks.command.mock.calls.filter(([name]) => name === "get_profile_state").length,
+      ).toBeGreaterThanOrEqual(2),
+    { timeout: 3500 },
+  );
+  fireEvent.change(password, { target: { value: "wrong password" } });
+  fireEvent.submit(password.closest("form")!);
+  await waitFor(() =>
+    expect(screen.getByLabelText("Password")).toHaveAttribute("aria-invalid", "true"),
+  );
+  expect(screen.getByLabelText("Password")).toHaveFocus();
+  expect(mocks.reload).not.toHaveBeenCalled();
+  fireEvent.change(password, { target: { value: "existing password" } });
+  fireEvent.submit(password.closest("form")!);
+  await waitFor(() =>
+    expect(mocks.command).toHaveBeenCalledWith("unlock_profile", {
+      profileId: "a",
+      proof: "existing password",
+    }),
+  );
+  await waitFor(() => expect(mocks.reload).toHaveBeenCalled());
+});
 it("keeps the new recovery code visible after password setup revokes the session", async () => {
   mount();
   fireEvent.keyDown(await screen.findByRole("button", { name: "Profile menu for Personal" }), {
@@ -190,7 +229,10 @@ it("keeps failed teardown covered and lets the user retry", async () => {
       : Promise.resolve(unlocked),
   );
   await menuAction("Switch profile");
-  expect(await screen.findByRole("alert")).toHaveTextContent("Teardown failed");
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "Something went wrong. Please try again.",
+  );
+  expect(screen.getByRole("status")).toHaveTextContent("Couldn’t finish locking");
   expect(screen.queryByText("Private portfolio")).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Personal" })).not.toBeInTheDocument();
   mocks.command.mockResolvedValue({ ...unlocked, session: null });
@@ -229,7 +271,7 @@ it("ignores a status read from before a switch started", async () => {
   expect(screen.queryByText("Private portfolio")).not.toBeInTheDocument();
 });
 
-it("keeps all profiles visible during password entry and clears credentials when switching", async () => {
+it("centers the selected profile and lets users go back without retaining credentials", async () => {
   const second = { id: "b", name: "Family", avatarId: "clay-fluff-animated", lockEnabled: true };
   mocks.command.mockResolvedValue({
     profiles: [{ ...profile, lockEnabled: true }, second],
@@ -240,9 +282,12 @@ it("keeps all profiles visible during password entry and clears credentials when
   fireEvent.click(await screen.findByRole("button", { name: "Personal" }));
   fireEvent.change(screen.getByLabelText("Password"), { target: { value: "123456" } });
   expect(screen.getByRole("button", { name: "Personal" })).toHaveAttribute("aria-pressed", "true");
-  fireEvent.click(screen.getByRole("button", { name: "Family" }));
+  fireEvent.click(screen.getByRole("button", { name: "Back" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Family" }));
   expect(screen.getByLabelText("Password")).toHaveValue("");
-  expect(screen.getByRole("button", { name: "Personal" })).toBeInTheDocument();
+  await waitFor(() =>
+    expect(screen.queryByRole("button", { name: "Personal" })).not.toBeInTheDocument(),
+  );
   expect(screen.queryByText("password required")).not.toBeInTheDocument();
   expect(screen.queryByText("Open profile")).not.toBeInTheDocument();
   fireEvent.change(screen.getByLabelText("Password"), { target: { value: "654321" } });
@@ -272,7 +317,8 @@ it("does not send another profile's password when selecting an unprotected profi
   mount();
   fireEvent.click(await screen.findByRole("button", { name: "Personal" }));
   fireEvent.change(screen.getByLabelText("Password"), { target: { value: "123456" } });
-  fireEvent.click(screen.getByRole("button", { name: "Family" }));
+  fireEvent.click(screen.getByRole("button", { name: "Back" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Family" }));
   await waitFor(() =>
     expect(mocks.command).toHaveBeenCalledWith("unlock_profile", {
       profileId: "b",
@@ -310,6 +356,13 @@ it("keeps password verification on the lock screen and allows retry after an inc
   expect(input).toBeInTheDocument();
   expect(input).toBeDisabled();
   expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  await waitFor(() =>
+    expect(mocks.command).toHaveBeenCalledWith("unlock_profile", {
+      profileId: "a",
+      proof: "111111",
+    }),
+  );
+  expect(input.closest("main")).toHaveClass("profile-centering");
   await act(async () =>
     pending.reject(
       new Error("PROFILE_PASSWORD_INVALID: The password or recovery code is incorrect."),
@@ -318,7 +371,8 @@ it("keeps password verification on the lock screen and allows retry after an inc
   expect(screen.getByLabelText("Password")).toBe(input);
   expect(input).toHaveAttribute("aria-invalid", "true");
   expect(input).toHaveFocus();
-  expect(screen.getByRole("alert")).toHaveClass("sr-only");
+  expect(screen.getByRole("alert")).not.toHaveClass("sr-only");
+  expect(screen.getByRole("alert")).toHaveTextContent("Incorrect password. Try again.");
   expect(screen.queryByText(/PROFILE_PASSWORD_INVALID/)).not.toBeInTheDocument();
   expect(mocks.reload).not.toHaveBeenCalled();
   fireEvent.change(input, { target: { value: "123456" } });
@@ -408,7 +462,7 @@ it.each(["setup", "change", "recovery"])(
       target: { value: "different password" },
     });
     mocks.command.mockClear();
-    fireEvent.click(screen.getByRole("button", { name: /^Save(?: changes)?$/ }));
+    fireEvent.click(screen.getByRole("button", { name: /^(?:Save(?: changes)?|Reset password)$/ }));
     expect(await screen.findByText("Passwords do not match.")).toBeInTheDocument();
     expect(screen.getByLabelText("Re-enter password")).toHaveFocus();
     expect(mocks.command).not.toHaveBeenCalled();
@@ -421,7 +475,7 @@ it.each(["setup", "change", "recovery"])(
         return Promise.resolve({ ...protectedState, session: null });
       return Promise.resolve(null);
     });
-    fireEvent.click(screen.getByRole("button", { name: /^Save(?: changes)?$/ }));
+    fireEvent.click(screen.getByRole("button", { name: /^(?:Save(?: changes)?|Reset password)$/ }));
     await screen.findByText("NEW-RECOVERY-CODE");
     if (flow === "recovery") {
       expect(mocks.command).toHaveBeenCalledWith("recover_profile_password", {
@@ -498,6 +552,140 @@ it("deletes the last profile and returns to an empty profile picker", async () =
     true,
   );
   expect(screen.queryByText("Private portfolio")).not.toBeInTheDocument();
+});
+
+it("can create a protected profile and shows recovery before unlocking it", async () => {
+  const locked = { ...unlocked, session: null };
+  const created = { id: "b", name: "Family", avatarId: "default", lockEnabled: true };
+  mocks.command.mockImplementation((command) =>
+    Promise.resolve(
+      command === "create_profile" ? { ...created, recoveryCode: "ABCD-1234" } : locked,
+    ),
+  );
+  mount();
+  fireEvent.click(await screen.findByRole("button", { name: "Add profile" }));
+  fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Family" } });
+  expect(
+    screen
+      .getByRole("group", { name: "All avatars" })
+      .compareDocumentPosition(screen.getByRole("button", { name: "Save" })) &
+      Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy();
+
+  fireEvent.click(screen.getByRole("button", { name: "Enable password" }));
+  fireEvent.change(screen.getByLabelText("New password"), { target: { value: "123" } });
+  fireEvent.change(screen.getByLabelText("Re-enter password"), { target: { value: "123" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save" }));
+  const passwordField = screen.getByLabelText("New password");
+  const lengthError = screen.getByRole("alert");
+  expect(lengthError).toHaveTextContent("Use 4–128 characters for your password.");
+  expect(lengthError).toHaveAttribute("id", "profile-password-error");
+  expect(passwordField).toHaveAttribute("aria-describedby", lengthError.id);
+  expect(passwordField).toHaveAttribute("aria-invalid", "true");
+  expect(passwordField).toHaveFocus();
+  fireEvent.change(screen.getByLabelText("New password"), { target: { value: "1234" } });
+  expect(screen.queryByText("Use 4–128 characters for your password.")).not.toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText("Re-enter password"), {
+    target: { value: "different password" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Save" }));
+  expect(screen.getByText("Passwords do not match.")).toBeInTheDocument();
+  expect(mocks.command).not.toHaveBeenCalledWith("create_profile", expect.anything());
+  fireEvent.change(screen.getByLabelText("Re-enter password"), {
+    target: { value: "1234" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Save" }));
+  expect(await screen.findByText("ABCD-1234")).toBeInTheDocument();
+  const copy = vi
+    .fn()
+    .mockRejectedValueOnce(new Error("clipboard unavailable"))
+    .mockResolvedValue(undefined);
+  Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: copy } });
+  fireEvent.click(screen.getByRole("button", { name: "Copy recovery code" }));
+  expect(
+    await screen.findByText("Couldn't copy the code. Select it and copy it manually."),
+  ).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Copy recovery code" }));
+  expect(await screen.findByText("Copied to clipboard")).toBeInTheDocument();
+  expect(copy).toHaveBeenLastCalledWith("ABCD-1234");
+
+  expect(mocks.command).toHaveBeenCalledWith("create_profile", {
+    name: "Family",
+    avatarId: "default",
+    password: "1234",
+  });
+  expect(mocks.command).not.toHaveBeenCalledWith("unlock_profile", expect.anything());
+  expect(mocks.reload).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "I've saved my recovery code" }));
+  await waitFor(() =>
+    expect(mocks.command).toHaveBeenCalledWith("unlock_profile", {
+      profileId: "b",
+      proof: "1234",
+    }),
+  );
+  await waitFor(() => expect(mocks.reload).toHaveBeenCalled());
+});
+
+it("keeps password setup optional when creating a profile", async () => {
+  const locked = { ...unlocked, session: null };
+  mocks.command.mockImplementation((command) =>
+    Promise.resolve(
+      command === "create_profile"
+        ? { id: "b", name: "Family", avatarId: "default", lockEnabled: false, recoveryCode: null }
+        : locked,
+    ),
+  );
+  mount();
+  fireEvent.click(await screen.findByRole("button", { name: "Add profile" }));
+  fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Family" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save" }));
+  await waitFor(() => expect(mocks.reload).toHaveBeenCalled());
+  expect(mocks.command).toHaveBeenCalledWith("create_profile", {
+    name: "Family",
+    avatarId: "default",
+    password: null,
+  });
+  expect(mocks.command).toHaveBeenCalledWith("unlock_profile", { profileId: "b", proof: null });
+});
+
+it("shows recovery-code errors inline and returns to the selected profile unlock", async () => {
+  const locked = { ...unlocked, session: null, profiles: [{ ...profile, lockEnabled: true }] };
+  mocks.command.mockImplementation((command) =>
+    command === "recover_profile_password"
+      ? Promise.reject(new Error("PROFILE_PASSWORD_INVALID: invalid recovery"))
+      : Promise.resolve(locked),
+  );
+  mount();
+  fireEvent.click(await screen.findByRole("button", { name: "Personal" }));
+  fireEvent.click(screen.getByRole("button", { name: "Forgot password?" }));
+  expect(screen.getByRole("heading", { name: "Reset your password" })).toBeInTheDocument();
+  const code = screen.getByLabelText("Recovery code");
+  expect(code).toHaveFocus();
+  fireEvent.change(code, { target: { value: "incorrect" } });
+  fireEvent.change(screen.getByLabelText("New password"), { target: { value: "1234" } });
+  fireEvent.change(screen.getByLabelText("Re-enter password"), { target: { value: "1234" } });
+  fireEvent.click(screen.getByRole("button", { name: "Reset password" }));
+  expect(
+    await screen.findByText("This recovery code is incorrect. Check it and try again."),
+  ).toBeInTheDocument();
+  expect(code).toHaveAttribute("aria-describedby", "profile-recovery-error");
+  fireEvent.change(code, { target: { value: "replacement" } });
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Back to unlock" }));
+  expect(screen.getByLabelText("Password")).toHaveValue("");
+  expect(screen.getByRole("button", { name: "Unlock" })).toBeInTheDocument();
+});
+
+it("offers a prominent create action when there are no profiles", async () => {
+  mocks.command.mockResolvedValue({ profiles: [], session: null, starting: false });
+  mount();
+  const title = await screen.findByRole("heading", { name: "Create your first profile" });
+  expect(title).not.toHaveClass("sr-only");
+  const create = screen.getByRole("button", { name: "Create profile" });
+  expect(create).not.toHaveClass("profile-lock-add");
+  fireEvent.click(create);
+  expect(screen.getByRole("heading", { name: "Create a profile" })).toBeInTheDocument();
+  expect(screen.getByLabelText("Name")).toBeInTheDocument();
 });
 
 it("keeps the native profile open when switching to another app", async () => {
@@ -581,6 +769,45 @@ it("continues polling web profile state", async () => {
   expect(
     mocks.command.mock.calls.filter(([command]) => command === "get_profile_state"),
   ).toHaveLength(3);
+});
+
+it("shows cooldown feedback below the unlock button and keeps the password form available", async () => {
+  const locked = { ...unlocked, profiles: [{ ...profile, lockEnabled: true }], session: null };
+  mocks.command.mockImplementation((command) =>
+    command === "unlock_profile"
+      ? Promise.reject(new Error('"PROFILE_COOLDOWN: Try again in 30 seconds."'))
+      : Promise.resolve(locked),
+  );
+  mount();
+  fireEvent.click(await screen.findByRole("button", { name: "Personal" }));
+  const input = screen.getByLabelText("Password");
+  fireEvent.change(input, { target: { value: "wrong password" } });
+  const button = screen.getByRole("button", { name: "Unlock" });
+  fireEvent.click(button);
+  const alert = await screen.findByRole("alert");
+  expect(alert).toHaveTextContent("Too many attempts. Try again in 30 seconds.");
+  expect(alert.closest("form")).toBe(input.closest("form"));
+  expect(button.compareDocumentPosition(alert) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(input).toHaveAccessibleDescription("Too many attempts. Try again in 30 seconds.");
+  expect(screen.queryByText(/PROFILE_COOLDOWN/)).not.toBeInTheDocument();
+  fireEvent.change(input, { target: { value: "another password" } });
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+});
+
+it("uses safe form feedback when creating a profile fails unexpectedly", async () => {
+  mocks.command.mockImplementation((command) =>
+    command === "create_profile"
+      ? Promise.reject(new Error("database /private/internal/profile.db unavailable"))
+      : Promise.resolve({ ...unlocked, profiles: [], session: null }),
+  );
+  mount();
+  fireEvent.click(await screen.findByRole("button", { name: "Create profile" }));
+  fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Test" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save" }));
+  const alert = await screen.findByRole("alert");
+  expect(alert).toHaveTextContent("Something went wrong. Please try again.");
+  expect(alert.closest("form")).not.toBeNull();
+  expect(screen.queryByText(/private\/internal/)).not.toBeInTheDocument();
 });
 
 it("rereads native startup when readiness arrives during the initial request", async () => {

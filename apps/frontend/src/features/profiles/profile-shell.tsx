@@ -1,4 +1,6 @@
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { DATABASE_STATE_CHANGED } from "../../adapters/tauri/events";
+import { profileErrorMessage } from "./error-messages";
 import { clearProfilePreferences } from "@/hooks/use-persistent-state";
 import { DeleteProfileDialog } from "./delete-profile-dialog";
 import { StartupScreen } from "@/components/startup-screen";
@@ -8,7 +10,7 @@ import { useTranslation } from "react-i18next";
 import { useQueryClient } from "@tanstack/react-query";
 import { isNativeAuthPending } from "./auth-bridge";
 import { isWeb } from "@/adapters";
-import { Button, Input, Label } from "@wealthfolio/ui";
+import { Button, Icons, Input, Label } from "@wealthfolio/ui";
 import { PasswordInput } from "@wealthfolio/ui/components/ui/password-input";
 import { useCallback, useEffect, useRef, useState, type ReactNode, type FormEvent } from "react";
 import { profileCommand, type ProfileState, type ProfileSummary } from "./api";
@@ -23,11 +25,14 @@ import {
   type ProfileSession,
 } from "./session";
 
-const MIN_PASSWORD_LENGTH = 8;
+const PROFILE_SELECTION_MS = 180;
+const MIN_PASSWORD_LENGTH = 4;
 const MAX_PASSWORD_LENGTH = 128;
+const PASSWORD_LENGTH_ERROR = "PROFILE_PASSWORD_LENGTH";
 
 export function ProfileShell({ children }: { children: ReactNode }) {
   const queries = useQueryClient();
+  const reducedMotion = useReducedMotion();
   const { t } = useTranslation("common", { useSuspense: false });
   type Phase = "loading" | "closing" | "opening" | "locked" | "active" | "deleting";
   const [phase, updatePhase] = useState<Phase>("loading");
@@ -63,6 +68,7 @@ export function ProfileShell({ children }: { children: ReactNode }) {
   const deletion = useRef<{ profileId: string; confirmation: string } | undefined>(undefined);
   const [busy, setBusy] = useState(false);
   const [recovery, setRecovery] = useState<string>();
+  const [copiedRecovery, setCopiedRecovery] = useState<string>();
   const [covered, setCovered] = useState(false);
   const sessionScope = state?.session?.scopeId;
   const [authPending, setAuthPending] = useState(isNativeAuthPending);
@@ -293,20 +299,40 @@ export function ProfileShell({ children }: { children: ReactNode }) {
     setConfirmationInvalid(false);
     setProof("");
     setError("");
-    if (profile.lockEnabled) setMode("unlock");
-    else void run(() => unlock(profile.id, ""));
+    setMode("unlock");
+    if (!profile.lockEnabled) {
+      void run(() => unlock(profile.id, ""));
+    }
   }
-  async function unlock(id: string, unlockProof = password) {
-    const target = state?.profiles.find((p) => p.id === id);
+  async function unlock(id: string, unlockProof = password, createdProfile?: ProfileSummary) {
+    const target =
+      createdProfile ?? (selected?.id === id ? selected : state?.profiles.find((p) => p.id === id));
     if (target) setSelected(target);
+    // Finish moving the avatar before loading replaces this screen.
+    if (mode !== "create" && !reducedMotion)
+      await new Promise((resolve) => setTimeout(resolve, PROFILE_SELECTION_MS));
     try {
       await profileCommand<ProfileSession>("unlock_profile", {
         profileId: id,
         proof: unlockProof || null,
       });
     } catch (error) {
-      if (String(error).includes("PROFILE_PASSWORD_INVALID") && mode === "unlock") {
-        setPasswordInvalid(true);
+      // The stored lock is authoritative; a migrated registry may have an old hint.
+      const invalidPassword = String(error).includes("PROFILE_PASSWORD_INVALID");
+      if (target && (String(error).includes("PROFILE_LOCKED") || invalidPassword)) {
+        setSelected({ ...target, lockEnabled: true });
+        setState((current) =>
+          current
+            ? {
+                ...current,
+                profiles: current.profiles.map((profile) =>
+                  profile.id === id ? { ...profile, lockEnabled: true } : profile,
+                ),
+              }
+            : current,
+        );
+        setMode("unlock");
+        setPasswordInvalid(invalidPassword);
         return;
       }
       throw error;
@@ -369,7 +395,11 @@ export function ProfileShell({ children }: { children: ReactNode }) {
   }
   if (phase === "deleting")
     return (
-      <StartupScreen profile={selected} message="Deleting profile…" error={error || undefined}>
+      <StartupScreen
+        profile={selected}
+        message={t("profiles.deletingProfile")}
+        error={error ? profileErrorMessage(error, t) : undefined}
+      >
         <Button
           disabled={busy}
           onClick={() => {
@@ -377,7 +407,7 @@ export function ProfileShell({ children }: { children: ReactNode }) {
             if (pending) void deleteProfile(pending.confirmation, "", true);
           }}
         >
-          {busy ? "Deleting…" : "Retry deletion"}
+          {busy ? t("profiles.deleting") : t("profiles.retryDeletion")}
         </Button>
         {!busy && (
           <Button
@@ -393,7 +423,7 @@ export function ProfileShell({ children }: { children: ReactNode }) {
               setPhase("locked");
             }}
           >
-            Back to profiles
+            {t("profiles.backToProfiles")}
           </Button>
         )}
       </StartupScreen>
@@ -403,6 +433,7 @@ export function ProfileShell({ children }: { children: ReactNode }) {
     event.preventDefault();
     const settingPassword =
       mode === "recover" ||
+      (mode === "create" && passwordManagement) ||
       (mode === "manage" &&
         passwordManagement &&
         !removePassword &&
@@ -410,7 +441,8 @@ export function ProfileShell({ children }: { children: ReactNode }) {
     if (settingPassword) {
       const length = Array.from(password).length;
       if (length < MIN_PASSWORD_LENGTH || length > MAX_PASSWORD_LENGTH) {
-        setError(`Use ${MIN_PASSWORD_LENGTH}–${MAX_PASSWORD_LENGTH} characters for your password.`);
+        setError(PASSWORD_LENGTH_ERROR);
+        passwordInput.current?.focus();
         return;
       }
       if (password !== confirmPassword) {
@@ -423,14 +455,19 @@ export function ProfileShell({ children }: { children: ReactNode }) {
     await run(async () => {
       if (mode === "unlock" && selected) await unlock(selected.id);
       if (mode === "create") {
-        const created = await profileCommand<ProfileSummary>("create_profile", {
+        const { recoveryCode, ...created } = await profileCommand<
+          ProfileSummary & { recoveryCode: string | null }
+        >("create_profile", {
           name,
           avatarId: avatar,
+          password: passwordManagement ? password : null,
         });
         intent.current = "switch";
         setSelected(created);
+        setState((old) => (old ? { ...old, profiles: [...old.profiles, created] } : old));
         rememberOpeningProfile(created);
-        await unlock(created.id);
+        if (recoveryCode) setRecovery(recoveryCode);
+        else await unlock(created.id, "", created);
       }
       if (mode === "recover" && selected) {
         setRecovery(
@@ -466,11 +503,13 @@ export function ProfileShell({ children }: { children: ReactNode }) {
     return (
       <StartupScreen
         profile={selected}
-        error={error || undefined}
+        error={error ? profileErrorMessage(error, t) : undefined}
         message={
-          phase === "closing"
-            ? t("profiles.locking", { defaultValue: "Locking Wealthfolio…" })
-            : undefined
+          closeFailed
+            ? t("profiles.lockFailed", { defaultValue: "Couldn’t finish locking" })
+            : phase === "closing"
+              ? t("profiles.locking", { defaultValue: "Locking Wealthfolio…" })
+              : undefined
         }
       >
         {error && (
@@ -515,21 +554,59 @@ export function ProfileShell({ children }: { children: ReactNode }) {
   }
   const isProfileEditor = !recovery && (mode === "create" || mode === "manage");
   const isProfilePicker = !recovery && (mode === "choose" || mode === "unlock");
+  const hasNoProfiles = state?.profiles.length === 0;
+  const isRecoveryView = Boolean(recovery) || mode === "recover";
+  const recoveryCodeInvalid = mode === "recover" && error.includes("PROFILE_PASSWORD_INVALID");
+  const formError =
+    error && error !== PASSWORD_LENGTH_ERROR && !recoveryCodeInvalid && !deleteOpen ? (
+      <p
+        id="profile-form-error"
+        role="alert"
+        className="text-destructive break-words text-sm leading-relaxed"
+      >
+        {profileErrorMessage(error, t)}
+      </p>
+    ) : null;
   const formActions = (
-    <div className="flex flex-wrap gap-2 pt-2">
+    <div
+      className={
+        mode === "recover"
+          ? "flex flex-col gap-2 pt-2"
+          : "bg-background/95 fixed inset-x-0 bottom-0 z-20 flex justify-center gap-2 border-t px-6 pb-[calc(1rem+env(safe-area-inset-bottom,0px))] pt-3 backdrop-blur-md sm:static sm:justify-start sm:border-0 sm:bg-transparent sm:px-0 sm:pb-0 sm:pt-2 sm:backdrop-blur-none"
+      }
+    >
       <Button disabled={busy} type="submit">
-        {mode === "manage" ? "Save changes" : "Save"}
+        {mode === "recover"
+          ? busy
+            ? t("profiles.resettingPassword")
+            : t("profiles.resetPassword")
+          : mode === "manage"
+            ? t("profiles.saveChanges")
+            : t("profiles.save")}
       </Button>
       <Button
         type="button"
         variant="ghost"
         disabled={busy}
         onClick={() => {
-          intent.current = "switch";
-          setMode("choose");
+          if (mode === "recover") {
+            setError("");
+            setProof("");
+            setPassword("");
+            setConfirmPassword("");
+            setConfirmationInvalid(false);
+            setMode("unlock");
+          } else {
+            intent.current = "switch";
+            setMode("choose");
+          }
         }}
       >
-        {isProfileEditor ? "Cancel" : "Back"}
+        {mode === "recover"
+          ? t("profiles.backToUnlock")
+          : isProfileEditor
+            ? t("profiles.cancel")
+            : t("profiles.back")}
       </Button>
     </div>
   );
@@ -539,31 +616,50 @@ export function ProfileShell({ children }: { children: ReactNode }) {
         (mode === "manage" && passwordManagement && selected?.lockEnabled)) && (
         <div className="space-y-2">
           <Label htmlFor="profile-proof">
-            {mode === "recover" ? "Recovery code" : "Current password or recovery code"}
+            {mode === "recover" ? t("profiles.recoveryCode") : t("profiles.currentProof")}
           </Label>
           <PasswordInput
             id="profile-proof"
             showLabel={
-              mode === "recover" ? "Show recovery code" : "Show current password or recovery code"
+              mode === "recover" ? t("profiles.showRecovery") : t("profiles.showCurrentProof")
             }
             hideLabel={
-              mode === "recover" ? "Hide recovery code" : "Hide current password or recovery code"
+              mode === "recover" ? t("profiles.hideRecovery") : t("profiles.hideCurrentProof")
             }
             className="h-11 rounded-full bg-white/30 ps-4 backdrop-blur-md dark:bg-white/5"
             value={proof}
-            onChange={(e) => setProof(e.target.value)}
+            onChange={(e) => {
+              setProof(e.target.value);
+              if (recoveryCodeInvalid) setError("");
+            }}
+            autoFocus={mode === "recover"}
+            aria-invalid={recoveryCodeInvalid}
+            aria-describedby={
+              recoveryCodeInvalid
+                ? "profile-recovery-error"
+                : mode === "recover"
+                  ? "profile-recovery-help"
+                  : undefined
+            }
             required={mode === "recover" || removePassword || Boolean(password)}
             autoComplete={mode === "recover" ? "off" : "current-password"}
           />
+          {recoveryCodeInvalid && (
+            <p id="profile-recovery-error" role="alert" className="text-destructive text-sm">
+              {t("profiles.errors.incorrectRecovery")}
+            </p>
+          )}
         </div>
       )}
-      {(mode === "recover" || (mode === "manage" && passwordManagement && !removePassword)) && (
+      {(mode === "recover" ||
+        ((mode === "create" || mode === "manage") && passwordManagement && !removePassword)) && (
         <div className="space-y-2">
-          <Label htmlFor="profile-password">New password</Label>
+          <Label htmlFor="profile-password">{t("profiles.newPassword")}</Label>
           <PasswordInput
+            ref={passwordInput}
             id="profile-password"
-            showLabel="Show new password"
-            hideLabel="Hide new password"
+            showLabel={t("profiles.showNewPassword")}
+            hideLabel={t("profiles.hideNewPassword")}
             className="h-11 rounded-full bg-white/30 ps-4 backdrop-blur-md dark:bg-white/5"
             value={password}
             onChange={(e) => {
@@ -571,16 +667,28 @@ export function ProfileShell({ children }: { children: ReactNode }) {
               setConfirmationInvalid(false);
               setError("");
             }}
-            placeholder={`${MIN_PASSWORD_LENGTH}–${MAX_PASSWORD_LENGTH} characters`}
+            placeholder={t("profiles.passwordRange", {
+              min: MIN_PASSWORD_LENGTH,
+              max: MAX_PASSWORD_LENGTH,
+            })}
             autoComplete="new-password"
             required={mode !== "manage" || !selected?.lockEnabled || Boolean(confirmPassword)}
+            aria-invalid={error === PASSWORD_LENGTH_ERROR}
+            aria-describedby={
+              error === PASSWORD_LENGTH_ERROR ? "profile-password-error" : undefined
+            }
           />
-          <Label htmlFor="profile-confirm-password">Re-enter password</Label>
+          {error === PASSWORD_LENGTH_ERROR && (
+            <p id="profile-password-error" role="alert" className="text-destructive text-sm">
+              {profileErrorMessage(error, t)}
+            </p>
+          )}
+          <Label htmlFor="profile-confirm-password">{t("profiles.confirmPassword")}</Label>
           <PasswordInput
             ref={confirmationInput}
             id="profile-confirm-password"
-            showLabel="Show re-entered password"
-            hideLabel="Hide re-entered password"
+            showLabel={t("profiles.showConfirmation")}
+            hideLabel={t("profiles.hideConfirmation")}
             className="h-11 rounded-full bg-white/30 ps-4 backdrop-blur-md dark:bg-white/5"
             value={confirmPassword}
             onChange={(e) => {
@@ -598,7 +706,7 @@ export function ProfileShell({ children }: { children: ReactNode }) {
               role="alert"
               className="text-destructive text-sm"
             >
-              Passwords do not match.
+              {t("profiles.errors.passwordMismatch")}
             </p>
           )}
         </div>
@@ -607,14 +715,14 @@ export function ProfileShell({ children }: { children: ReactNode }) {
   );
   return (
     <main
-      className={`bg-background text-foreground relative flex min-h-dvh items-center justify-center px-6 py-16 ${isProfilePicker ? "profile-lock-screen pt-24" : isProfileEditor ? "profile-lock-screen profile-settings-screen" : ""}`}
+      className={`bg-background text-foreground relative flex min-h-dvh items-center justify-center px-6 py-16 ${mode === "unlock" && busy ? "profile-centering" : ""} ${isProfilePicker ? "profile-lock-screen pt-24" : isProfileEditor ? "profile-lock-screen profile-settings-screen" : isRecoveryView ? "profile-lock-screen" : ""}`}
       aria-busy={busy}
     >
       <div data-tauri-drag-region className="absolute inset-x-0 top-0 z-50 h-8" />
       {isProfilePicker && (
         <div
           aria-hidden="true"
-          className="pointer-events-none absolute inset-x-0 top-10 flex justify-center"
+          className="pointer-events-none absolute inset-x-0 top-[calc(1rem+env(safe-area-inset-top,0px))] flex justify-center sm:top-10"
         >
           <div className="group/logo pointer-events-auto shrink-0 [perspective:400px]">
             <img
@@ -626,130 +734,233 @@ export function ProfileShell({ children }: { children: ReactNode }) {
         </div>
       )}
       <div
-        className={`w-full space-y-6 ${isProfileEditor ? "max-w-2xl text-left" : "max-w-xl text-center"}`}
+        className={`w-full space-y-6 ${isRecoveryView ? "!max-w-md rounded-3xl border border-white/40 bg-white/40 p-6 text-left shadow-xl shadow-black/5 backdrop-blur-xl sm:p-8 dark:border-white/10 dark:bg-white/5" : isProfileEditor ? "max-w-2xl text-left" : "max-w-xl text-center"}`}
       >
+        {isRecoveryView && selected && (
+          <div className="flex items-center gap-3 !overflow-visible">
+            <span className="profile-lock-avatar [--avatar-rim:3px]">
+              <ProfileAvatar id={selected.avatarId} className="size-12 rounded-full" />
+            </span>
+            <span className="text-muted-foreground min-w-0 truncate text-sm">{selected.name}</span>
+          </div>
+        )}
         <h1
           ref={heading}
           tabIndex={-1}
-          className={isProfilePicker ? "sr-only" : "text-2xl font-semibold outline-none"}
+          className={
+            isProfilePicker && !hasNoProfiles ? "sr-only" : "text-2xl font-semibold outline-none"
+          }
         >
           {recovery
-            ? "Save your recovery code"
+            ? t("profiles.saveRecovery")
             : mode === "choose" || mode === "unlock"
-              ? "Who's using Wealthfolio?"
+              ? hasNoProfiles
+                ? t("profiles.firstProfile")
+                : t("profiles.chooseProfile")
               : mode === "create"
-                ? "Create a profile"
+                ? t("profiles.createTitle")
                 : mode === "manage"
-                  ? "Your profile"
-                  : "Recover your profile"}
+                  ? t("profiles.yourProfile")
+                  : t("profiles.resetTitle")}
         </h1>
-        {error && (
-          <p role="alert" className="text-destructive break-words">
-            {error}
+        {mode === "recover" && !recovery && (
+          <p id="profile-recovery-help" className="text-muted-foreground text-sm leading-relaxed">
+            {t("profiles.recoveryHelp")}
           </p>
         )}
         {!state || state.starting ? (
-          <p>Opening Wealthfolio…</p>
+          <p>{t("profiles.opening")}</p>
         ) : authPending ? (
-          <p>Finish or cancel sign-in to continue. Your portfolio is locked.</p>
+          <p>{t("profiles.authPending")}</p>
         ) : recovery ? (
           <>
-            <p>
-              Keep this code somewhere safe. It can reset your password. It cannot recover a lost
-              database encryption key.
+            <p className="text-muted-foreground text-sm leading-relaxed">
+              {t("profiles.recoveryStorage")}
             </p>
-            <code className="block select-all break-all rounded-xl border p-4 text-lg">
-              {recovery}
-            </code>
+            <div className="space-y-2">
+              <div className="flex items-start gap-3 rounded-2xl border border-black/5 bg-white/50 p-4 dark:border-white/10 dark:bg-black/15">
+                <code className="min-w-0 flex-1 select-all break-words font-mono text-base leading-7 tracking-wide">
+                  {recovery}
+                </code>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="shrink-0 rounded-full"
+                  aria-label={
+                    copiedRecovery === recovery ? t("profiles.codeCopied") : t("profiles.copyCode")
+                  }
+                  onClick={async () => {
+                    try {
+                      await navigator.clipboard.writeText(recovery);
+                      setCopiedRecovery(recovery);
+                      setError("");
+                    } catch {
+                      setError("PROFILE_COPY_FAILED");
+                    }
+                  }}
+                >
+                  {copiedRecovery === recovery ? (
+                    <Icons.Check className="size-4" />
+                  ) : (
+                    <Icons.Copy className="size-4" />
+                  )}
+                </Button>
+              </div>
+              <p role="status" className="text-muted-foreground min-h-4 text-xs">
+                {copiedRecovery === recovery ? t("profiles.copied") : ""}
+              </p>
+            </div>
+            {formError}
+            <p className="text-muted-foreground text-xs leading-relaxed">
+              {t("profiles.recoveryLimit")}
+            </p>
             <Button
+              className="w-full"
+              disabled={busy}
               onClick={() => {
-                setRecovery(undefined);
-                reloadApplication();
+                if (mode === "create" && selected) {
+                  void run(() => unlock(selected.id, password));
+                } else {
+                  setRecovery(undefined);
+                  reloadApplication();
+                }
               }}
             >
-              I&apos;ve saved my recovery code
+              {t("profiles.savedRecovery")}
             </Button>
           </>
         ) : mode === "choose" || mode === "unlock" ? (
           <>
-            <div className="flex flex-wrap justify-center gap-6">
-              {state.profiles.map((profile) => (
-                <button
-                  key={profile.id}
-                  disabled={busy}
-                  onClick={() => select(profile)}
-                  aria-pressed={selected?.id === profile.id}
-                  className="profile-lock-option focus-visible:outline-ring flex w-28 flex-col items-center gap-4 rounded-2xl p-2 focus-visible:outline focus-visible:outline-2"
-                >
-                  <span className="profile-lock-avatar">
-                    <ProfileAvatar
-                      id={profile.avatarId}
-                      className="size-20 rounded-full [&_.profile-abstract-sculpture]:scale-90"
-                    />
-                  </span>
-                  <span className="block w-full break-words text-sm font-medium">
-                    {profile.name}
-                  </span>
-                </button>
-              ))}
+            {hasNoProfiles && (
+              <p className="text-muted-foreground mx-auto max-w-sm text-sm leading-relaxed">
+                {t("profiles.emptyHelp")}
+              </p>
+            )}
+            <div
+              className={
+                hasNoProfiles
+                  ? "hidden"
+                  : "profile-selection-list relative flex flex-wrap justify-center gap-6"
+              }
+            >
+              <AnimatePresence initial={false} mode="popLayout">
+                {state.profiles
+                  .filter((profile) => mode !== "unlock" || profile.id === selected?.id)
+                  .map((profile) => (
+                    <motion.button
+                      layout={reducedMotion ? false : "position"}
+                      initial={false}
+                      animate={{ opacity: 1 }}
+                      exit={{ opacity: 0 }}
+                      transition={{
+                        duration: reducedMotion ? 0 : PROFILE_SELECTION_MS / 1000,
+                        ease: "easeOut",
+                      }}
+                      key={profile.id}
+                      disabled={busy}
+                      onClick={() => select(profile)}
+                      aria-pressed={selected?.id === profile.id}
+                      className="profile-lock-option focus-visible:outline-ring flex w-28 flex-col items-center gap-4 rounded-2xl p-2 focus-visible:outline focus-visible:outline-2"
+                    >
+                      <span className="profile-lock-avatar">
+                        <ProfileAvatar
+                          id={profile.avatarId}
+                          className="size-20 rounded-full [&_.profile-abstract-sculpture]:scale-90"
+                        />
+                      </span>
+                      <span className="block w-full break-words text-sm font-medium">
+                        {profile.name}
+                      </span>
+                    </motion.button>
+                  ))}
+              </AnimatePresence>
             </div>
             {mode === "unlock" && selected?.lockEnabled && (
               <form
                 key={selected.id}
                 onSubmit={submit}
                 className="mx-auto max-w-xs space-y-3"
-                aria-label={`Unlock ${selected.name}`}
+                aria-label={t("profiles.unlockLabel", { name: selected.name })}
               >
                 <Label htmlFor="profile-password" className="sr-only">
-                  Password
+                  {t("profiles.password")}
                 </Label>
                 <PasswordInput
                   ref={passwordInput}
                   id="profile-password"
                   aria-invalid={passwordInvalid}
-                  aria-describedby={passwordInvalid ? "profile-password-error" : undefined}
-                  showLabel="Show password"
-                  hideLabel="Hide password"
+                  aria-describedby={
+                    passwordInvalid
+                      ? "profile-password-error"
+                      : error
+                        ? "profile-form-error"
+                        : undefined
+                  }
+                  showLabel={t("profiles.showPassword")}
+                  hideLabel={t("profiles.hidePassword")}
                   value={password}
                   onChange={(event) => {
                     setPassword(event.target.value);
                     setPasswordInvalid(false);
+                    setError("");
                   }}
-                  placeholder="Enter password"
+                  placeholder={t("profiles.enterPassword")}
                   className={`h-11 rounded-full border-white/40 bg-white/30 ps-10 text-center backdrop-blur-md dark:border-white/10 dark:bg-white/5 ${passwordInvalid ? "profile-password-invalid" : ""}`}
                   autoComplete="current-password"
                   autoFocus
                   required
                   disabled={busy}
                 />
+                <Button disabled={busy} type="submit" className="w-full">
+                  {t("profiles.unlock")}
+                </Button>
                 {passwordInvalid && (
-                  <span id="profile-password-error" role="alert" className="sr-only">
-                    Incorrect password. Try again.
+                  <span
+                    id="profile-password-error"
+                    role="alert"
+                    className="text-destructive block text-sm leading-relaxed"
+                  >
+                    {t("profiles.errors.incorrectPassword")}
                   </span>
                 )}
-                <Button disabled={busy} type="submit" className="w-full">
-                  Unlock
-                </Button>
+                {formError}
                 <Button
                   type="button"
                   variant="link"
                   className="text-muted-foreground text-xs"
                   disabled={busy}
                   onClick={() => {
+                    setError("");
+                    setPasswordInvalid(false);
                     setMode("recover");
                     setPassword("");
                     setConfirmPassword("");
                     setConfirmationInvalid(false);
                   }}
                 >
-                  Forgot password?
+                  {t("profiles.forgotPassword")}
                 </Button>
               </form>
             )}
+            {mode === "unlock" && (
+              <Button
+                variant="ghost"
+                disabled={busy}
+                onClick={() => {
+                  setMode("choose");
+                  setPassword("");
+                  setPasswordInvalid(false);
+                  setError("");
+                }}
+              >
+                {t("profiles.back")}
+              </Button>
+            )}
             <Button
-              variant="ghost"
-              size="sm"
-              className="profile-lock-add text-muted-foreground text-xs"
+              variant={hasNoProfiles ? "default" : "ghost"}
+              size={hasNoProfiles ? "lg" : "sm"}
+              className={hasNoProfiles ? "px-8" : "profile-lock-add text-muted-foreground text-xs"}
               disabled={busy}
               onClick={() => {
                 setError("");
@@ -758,21 +969,25 @@ export function ProfileShell({ children }: { children: ReactNode }) {
                 setConfirmationInvalid(false);
                 setProof("");
                 setName("");
+                setPasswordManagement(false);
+                setRemovePassword(false);
+                setSelected(undefined);
                 setAvatar(DEFAULT_PROFILE_AVATAR);
                 setMode("create");
               }}
             >
-              {state?.profiles.length === 0 ? "Create profile" : "Add profile"}
+              {state?.profiles.length === 0 ? t("profiles.create") : t("profiles.add")}
             </Button>
+            {!(mode === "unlock" && selected?.lockEnabled) && formError}
             {state?.pendingDeletions?.map((profile) => (
               <div key={profile.id} className="space-y-2 text-sm">
-                <p>Deletion of {profile.name} is incomplete.</p>
+                <p>{t("profiles.incompleteDeletion", { name: profile.name })}</p>
                 <Button
                   variant="outline"
                   disabled={busy}
                   onClick={() => void deleteProfile(profile.name, "", true, profile)}
                 >
-                  Retry deletion of {profile.name}
+                  {t("profiles.retryNamedDeletion", { name: profile.name })}
                 </Button>
               </div>
             ))}
@@ -792,7 +1007,7 @@ export function ProfileShell({ children }: { children: ReactNode }) {
                     />
                   </span>
                   <div className="min-w-0 max-w-xs flex-1 space-y-2">
-                    <Label htmlFor="profile-name">Name</Label>
+                    <Label htmlFor="profile-name">{t("profiles.name")}</Label>
                     <Input
                       id="profile-name"
                       className="h-11 rounded-full bg-white/30 px-4 backdrop-blur-md dark:bg-white/5"
@@ -802,7 +1017,7 @@ export function ProfileShell({ children }: { children: ReactNode }) {
                       required
                       autoFocus
                     />
-                    {mode === "manage" && (!passwordManagement || removePassword) && (
+                    {(!passwordManagement || removePassword) && (
                       <Button
                         type="button"
                         variant="link"
@@ -813,10 +1028,10 @@ export function ProfileShell({ children }: { children: ReactNode }) {
                           setRemovePassword(false);
                         }}
                       >
-                        Enable password
+                        {t("profiles.enablePassword")}
                       </Button>
                     )}
-                    {mode === "manage" && passwordManagement && (
+                    {passwordManagement && (
                       <div className="space-y-4 pt-2">
                         {passwordFields}
                         {!removePassword && (
@@ -829,7 +1044,7 @@ export function ProfileShell({ children }: { children: ReactNode }) {
                               setPassword("");
                               setConfirmPassword("");
                               setConfirmationInvalid(false);
-                              if (selected?.lockEnabled) {
+                              if (mode === "manage" && selected?.lockEnabled) {
                                 setRemovePassword(true);
                               } else {
                                 setPasswordManagement(false);
@@ -837,32 +1052,30 @@ export function ProfileShell({ children }: { children: ReactNode }) {
                               }
                             }}
                           >
-                            Disable password
+                            {t("profiles.disablePassword")}
                           </Button>
                         )}
                       </div>
                     )}
-                    {formActions}
                   </div>
                 </div>
               </>
             )}
             {mode === "recover" && passwordFields}
             {isProfileEditor && <ProfileAvatarPicker value={avatar} onChange={setAvatar} />}
-            {!isProfileEditor && formActions}
+            {formActions}
+            {formError}
             {mode === "manage" && (
               <section className="border-destructive/25 space-y-2 border-t pt-6">
-                <h2 className="font-medium">Delete profile</h2>
-                <p className="text-muted-foreground text-sm">
-                  Permanently remove this profile and its local data.
-                </p>
+                <h2 className="font-medium">{t("profiles.delete")}</h2>
+                <p className="text-muted-foreground text-sm">{t("profiles.deleteHelp")}</p>
                 <Button
                   type="button"
                   variant="destructive"
                   disabled={busy}
                   onClick={() => setDeleteOpen(true)}
                 >
-                  Delete profile
+                  {t("profiles.delete")}
                 </Button>
               </section>
             )}

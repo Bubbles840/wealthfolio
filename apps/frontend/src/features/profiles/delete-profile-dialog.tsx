@@ -1,3 +1,5 @@
+import { profileErrorMessage } from "./error-messages";
+import { useTranslation } from "react-i18next";
 import { useState } from "react";
 import { backupDatabase, isWeb } from "@/adapters";
 import { Button, Input, Label } from "@wealthfolio/ui";
@@ -27,11 +29,23 @@ export function DeleteProfileDialog({
   onDelete,
   error: deletionError,
 }: DeleteProfileDialogProps) {
+  const { t } = useTranslation("common");
   const [confirmation, setConfirmation] = useState("");
   const [proof, setProof] = useState("");
   const [exporting, setExporting] = useState(false);
   const [backup, setBackup] = useState<string>();
   const [error, setError] = useState("");
+  const [proofEdited, setProofEdited] = useState(false);
+  const invalidProof = Boolean(deletionError?.includes("PROFILE_PASSWORD_INVALID"));
+  const cooldown = deletionError?.match(/PROFILE_COOLDOWN: Try again in (\d+) seconds/);
+  const deletionMessage =
+    !deletionError || invalidProof
+      ? ""
+      : cooldown
+        ? profileErrorMessage(deletionError, t)
+        : deletionError.includes("PROFILE_STALE") || deletionError.includes("PROFILE_LOCKED")
+          ? t("profiles.errors.deleteLocked")
+          : t("profiles.errors.delete");
   if (backup) return <BackupExportDialog filename={backup} onClose={() => setBackup(undefined)} />;
   return (
     <Dialog
@@ -40,16 +54,25 @@ export function DeleteProfileDialog({
         if (!open && !exporting) onClose();
       }}
     >
-      <DialogContent>
-        <DialogHeader>
-          <ProfileAvatar id={profile.avatarId} className="size-12" />
+      <DialogContent
+        className="gap-6 rounded-3xl sm:!max-w-md"
+        mobileClassName="h-[90vh] space-y-6 overflow-y-auto"
+      >
+        <DialogHeader className="gap-3 text-left">
+          <span className="profile-lock-avatar mx-auto mb-1 w-fit [--avatar-rim:3px]">
+            <ProfileAvatar id={profile.avatarId} className="size-14 rounded-full" />
+          </span>
           <DialogTitle>
-            Delete “{profile.name}” from this {isWeb ? "server" : "device"}?
+            {t(isWeb ? "profiles.deleteTitleServer" : "profiles.deleteTitleDevice", {
+              name: profile.name,
+            })}
           </DialogTitle>
           <DialogDescription>
-            This permanently removes this profile’s financial data, settings, saved credentials, and
-            local backups. Exported files, other devices, and your Wealthfolio Connect account are
-            unaffected. {isWeb && "Everyone using this profile on this server will lose access."}
+            {t("profiles.deleteWarning")}
+            <span className="mt-2 block">
+              {t("profiles.deletePreserved")}
+              {isWeb && <> {t("profiles.deleteServerWarning")}</>}
+            </span>
           </DialogDescription>
         </DialogHeader>
         <Button
@@ -61,25 +84,29 @@ export function DeleteProfileDialog({
             setError("");
             try {
               setBackup((await backupDatabase()).filename);
-            } catch (cause) {
-              setError(String(cause));
+            } catch {
+              setError("backup");
             } finally {
               setExporting(false);
             }
           }}
         >
-          {exporting ? "Preparing backup…" : "Export backup first"}
+          {exporting ? t("profiles.preparingBackup") : t("profiles.exportBackup")}
         </Button>
         <form
           onSubmit={(event) => {
             event.preventDefault();
-            if (confirmation === profile.name && (!profile.lockEnabled || proof))
+            if (confirmation === profile.name && (!profile.lockEnabled || proof)) {
+              setProofEdited(false);
               onDelete(confirmation, proof);
+            }
           }}
           className="space-y-4"
         >
           <div className="space-y-2">
-            <Label htmlFor="delete-profile-name">Type {profile.name} to confirm</Label>
+            <Label htmlFor="delete-profile-name">
+              {t("profiles.confirmDeletion", { name: profile.name })}
+            </Label>
             <Input
               id="delete-profile-name"
               autoComplete="off"
@@ -90,26 +117,37 @@ export function DeleteProfileDialog({
           </div>
           {profile.lockEnabled && (
             <div className="space-y-2">
-              <Label htmlFor="delete-profile-proof">Current password or recovery code</Label>
+              <Label htmlFor="delete-profile-proof">{t("profiles.currentProof")}</Label>
               <PasswordInput
                 id="delete-profile-proof"
-                showLabel="Show password or recovery code"
-                hideLabel="Hide password or recovery code"
+                showLabel={t("profiles.showProof")}
+                hideLabel={t("profiles.hideProof")}
                 autoComplete="off"
                 value={proof}
-                onChange={(event) => setProof(event.target.value)}
+                onChange={(event) => {
+                  setProof(event.target.value);
+                  setProofEdited(true);
+                }}
+                aria-invalid={invalidProof && !proofEdited}
+                aria-describedby={
+                  invalidProof && !proofEdited ? "delete-profile-proof-error" : undefined
+                }
                 disabled={exporting}
               />
+              {invalidProof && !proofEdited && (
+                <p
+                  id="delete-profile-proof-error"
+                  role="alert"
+                  className="text-destructive text-sm"
+                >
+                  {t("profiles.errors.incorrectProof")}
+                </p>
+              )}
             </div>
-          )}
-          {(error || deletionError) && (
-            <p role="alert" className="text-destructive text-sm">
-              {error || deletionError}
-            </p>
           )}
           <DialogFooter>
             <Button type="button" variant="outline" onClick={onClose} disabled={exporting}>
-              Cancel
+              {t("profiles.cancel")}
             </Button>
             <Button
               type="submit"
@@ -118,9 +156,14 @@ export function DeleteProfileDialog({
                 exporting || confirmation !== profile.name || (profile.lockEnabled && !proof)
               }
             >
-              Delete profile
+              {t("profiles.delete")}
             </Button>
           </DialogFooter>
+          {(error || deletionMessage) && (
+            <p role="alert" className="text-destructive text-sm">
+              {error ? t("profiles.errors.backup") : deletionMessage}
+            </p>
+          )}
         </form>
       </DialogContent>
     </Dialog>
