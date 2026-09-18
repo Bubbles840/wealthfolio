@@ -8821,7 +8821,6 @@ dependencies = [
  "keyring-core",
  "local-ip-address",
  "log",
- "objc2",
  "objc2-app-kit",
  "objc2-foundation",
  "rand 0.8.6",

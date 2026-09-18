@@ -1,5 +1,7 @@
 import { matchesProfileScope } from "@/features/profiles/session";
 
+export const DATABASE_STATE_CHANGED = "database-state-changed";
+
 // Event Listeners
 import type {
   EventCallback as TauriEventCallback,

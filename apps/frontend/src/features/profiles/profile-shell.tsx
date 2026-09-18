@@ -1,10 +1,10 @@
+import { DATABASE_STATE_CHANGED } from "../../adapters/tauri/events";
 import { clearProfilePreferences } from "@/hooks/use-persistent-state";
 import { DeleteProfileDialog } from "./delete-profile-dialog";
 import { StartupScreen } from "@/components/startup-screen";
 import { reloadApplication } from "@/lib/reload-application";
 import { clearOpeningProfile, rememberOpeningProfile } from "./startup-hint";
 import { useTranslation } from "react-i18next";
-import { useNativePrivacyCover } from "./use-native-privacy-cover";
 import { useQueryClient } from "@tanstack/react-query";
 import { isNativeAuthPending } from "./auth-bridge";
 import { isWeb } from "@/adapters";
@@ -107,9 +107,14 @@ export function ProfileShell({ children }: { children: ReactNode }) {
   useEffect(() => {
     let cancelled = false;
     let inFlight = false;
+    let refreshPending = false;
     const refresh = async () => {
+      if (cancelled) return;
+      if (inFlight) {
+        refreshPending = true;
+        return;
+      }
       if (
-        inFlight ||
         working.current ||
         phaseRef.current === "opening" ||
         phaseRef.current === "closing" ||
@@ -165,11 +170,15 @@ export function ProfileShell({ children }: { children: ReactNode }) {
         if (!cancelled && requestEpoch === epoch.current) setError(String(e));
       } finally {
         inFlight = false;
+        if (refreshPending && !cancelled) {
+          refreshPending = false;
+          void refresh();
+        }
       }
     };
     refreshRef.current = () => void refresh();
-    void refresh();
-    const timer = window.setInterval(refresh, 2000);
+    // Web has no native session events and must observe changes from other clients.
+    const webTimer = isWeb ? window.setInterval(() => void refresh(), 2000) : undefined;
     const locked = () => {
       epoch.current += 1;
       void queries.cancelQueries();
@@ -184,22 +193,41 @@ export function ProfileShell({ children }: { children: ReactNode }) {
       }
     };
     window.addEventListener("wealthfolio:profile-locked", locked);
-    let unlisten: (() => void) | undefined;
+    const unlisteners: (() => void)[] = [];
     if (!isWeb)
       void import("@tauri-apps/api/event")
-        .then(({ listen }) =>
-          listen("profile-session-changed", () => {
-            revokeProfileSession();
-          }),
-        )
-        .then((fn) => {
-          if (cancelled) fn();
-          else unlisten = fn;
+        .then(async ({ listen }) => {
+          for (const [event, handler] of [
+            ["profile-session-changed", revokeProfileSession],
+            ["app:ready", () => void refresh()],
+            // Rebuilds can revoke the scoped database reader while maintenance
+            // is running. The shell survives that reader and renews admission.
+            [DATABASE_STATE_CHANGED, () => void refresh()],
+          ] as const) {
+            const unlisten = await listen(event, handler);
+            if (cancelled) {
+              unlisten();
+              return;
+            }
+            unlisteners.push(unlisten);
+          }
+          // Subscribe before reading so startup or lock changes cannot be missed.
+          void refresh();
+        })
+        .catch((cause) => {
+          if (cancelled) return;
+          // A state read cannot replace the missing lock listener. Keep the
+          // shell closed until a reload can register all subscriptions again.
+          cancelled = true;
+          unlisteners.splice(0).forEach((unlisten) => unlisten());
+          refreshRef.current = () => reloadApplication();
+          setError(String(cause));
         });
+    else void refresh();
     return () => {
       cancelled = true;
-      clearInterval(timer);
-      unlisten?.();
+      window.clearInterval(webTimer);
+      unlisteners.forEach((unlisten) => unlisten());
       window.removeEventListener("wealthfolio:profile-locked", locked);
     };
   }, [queries, lock, setPhase]);
@@ -214,16 +242,11 @@ export function ProfileShell({ children }: { children: ReactNode }) {
         revokeProfileSession(),
       );
     };
-    const hidden = () => {
-      if (!isWeb && document.hidden) void lock(true);
-    };
     for (const event of ["pointerdown", "keydown", "touchstart", "wheel"])
       window.addEventListener(event, activity, { passive: true });
-    document.addEventListener("visibilitychange", hidden);
     return () => {
       for (const event of ["pointerdown", "keydown", "touchstart", "wheel"])
         window.removeEventListener(event, activity);
-      document.removeEventListener("visibilitychange", hidden);
     };
   }, [sessionScope, covered, lock]);
 
@@ -242,8 +265,6 @@ export function ProfileShell({ children }: { children: ReactNode }) {
       passwordInput.current?.select();
     }
   }, [passwordInvalid, busy]);
-
-  useNativePrivacyCover(covered || phase !== "active");
 
   async function run(action: () => Promise<void>) {
     if (working.current) return;

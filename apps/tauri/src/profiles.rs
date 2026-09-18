@@ -567,16 +567,8 @@ pub async fn recover_profile_password(
 // Backend time is authoritative; network polling never counts as user activity.
 pub fn start_lock_monitor(handle: AppHandle) {
     tauri::async_runtime::spawn(async move {
-        let mut last_tick = std::time::SystemTime::now();
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            if last_tick
-                .elapsed()
-                .is_ok_and(|elapsed| elapsed > std::time::Duration::from_secs(10))
-            {
-                crate::profile_lifecycle::request_lock("suspend timer gap");
-            }
-            last_tick = std::time::SystemTime::now();
             let profiles = handle.state::<NativeProfiles>();
             if profiles.transition.try_lock().is_ok()
                 && !profiles.starting.load(Ordering::SeqCst)

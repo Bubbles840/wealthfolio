@@ -280,8 +280,6 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             profiles::get_profile_state,
-            profile_lifecycle::profile_cover_ready,
-            profile_lifecycle::profile_cover_state,
             profiles::profile_auth_storage,
             profiles::capture_profile_auth_callback,
             profiles::create_profile,

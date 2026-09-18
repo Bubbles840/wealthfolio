@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 use log::{error, info, warn};
 use tauri::async_runtime::JoinHandle;
-use tauri::AppHandle;
+use tauri::{AppHandle, Emitter};
 use wealthfolio_ai::ProviderApiError;
 use wealthfolio_core::errors::{DatabaseError, Error, Result as CoreResult};
 use wealthfolio_core::events::DomainEvent;
@@ -570,7 +570,7 @@ impl DatabaseRuntime {
             {
                 return Err(DatabaseUnavailable::Maintenance.to_string());
             }
-            let _gate = MaintenanceGate(&runtime.maintenance);
+            let _gate = MaintenanceGate(&runtime.maintenance, None).notifying(&handle);
             {
                 let live = runtime.lock(&runtime.live)?;
                 if live.is_some() {
@@ -721,16 +721,17 @@ impl DatabaseRuntime {
         prepare: impl FnOnce(&Self) -> std::result::Result<MaintenanceRequest, String>,
     ) -> std::result::Result<MaintenanceOutcome, String> {
         self.check_available()?;
-        let (_gate, request) = self.prepare_maintenance(prepare)?;
+        let (_gate, request) = self.prepare_maintenance(Some(handle), prepare)?;
         let result = self.run_maintenance_inner(handle, request).await;
         self.record_maintenance_error(result.as_ref().err().map(String::as_str))?;
         result
     }
 
-    fn prepare_maintenance(
-        &self,
+    fn prepare_maintenance<'a>(
+        &'a self,
+        handle: Option<&'a AppHandle>,
         prepare: impl FnOnce(&Self) -> std::result::Result<MaintenanceRequest, String>,
-    ) -> std::result::Result<(MaintenanceGate<'_>, MaintenanceRequest), String> {
+    ) -> std::result::Result<(MaintenanceGate<'a>, MaintenanceRequest), String> {
         if self
             .maintenance
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -740,7 +741,10 @@ impl DatabaseRuntime {
         }
         // Clear the gate on every exit, including a panic: leaving it set would
         // reject database work for the rest of the process's life.
-        let gate = MaintenanceGate(&self.maintenance);
+        let gate = MaintenanceGate(&self.maintenance, handle);
+        // Preparation can block or fail (for example, a keychain prompt).
+        // Notify before it starts so every observed busy state has an end event.
+        gate.notify();
 
         // Preparation may persist a new encryption key. Reject overlapping
         // requests before either can change the key used by the other.
@@ -1001,7 +1005,7 @@ impl DatabaseRuntime {
             if runtime.maintenance.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
                 return Err(DatabaseUnavailable::Maintenance.to_string());
             }
-            let _gate = MaintenanceGate(&runtime.maintenance);
+            let _gate = MaintenanceGate(&runtime.maintenance, None).notifying(&handle);
             {
                 let live = runtime.lock(&runtime.live)?;
                 if live.is_some() || runtime.has_outstanding_jobs()? || runtime.has_pool_users()? {
@@ -1082,11 +1086,28 @@ impl DatabaseRuntime {
 }
 
 /// Clears the maintenance gate when it goes out of scope.
-struct MaintenanceGate<'a>(&'a AtomicBool);
+struct MaintenanceGate<'a>(&'a AtomicBool, Option<&'a AppHandle>);
+
+impl<'a> MaintenanceGate<'a> {
+    fn notifying(mut self, handle: &'a AppHandle) -> Self {
+        self.1 = Some(handle);
+        self.notify();
+        self
+    }
+
+    fn notify(&self) {
+        if let Some(handle) = self.1 {
+            if let Err(error) = handle.emit(crate::events::DATABASE_STATE_CHANGED, ()) {
+                warn!("Failed to notify database state change: {error}");
+            }
+        }
+    }
+}
 
 impl Drop for MaintenanceGate<'_> {
     fn drop(&mut self) {
         self.0.store(false, Ordering::SeqCst);
+        self.notify();
     }
 }
 
@@ -1444,7 +1465,7 @@ mod tests {
 
         let first = std::thread::spawn(move || {
             let (_gate, request) = first_runtime
-                .prepare_maintenance(|runtime| {
+                .prepare_maintenance(None, |runtime| {
                     // Hold the first request before it creates a key, while
                     // the keychain is still empty and a second request enters.
                     started_tx.send(()).unwrap();
@@ -1464,7 +1485,7 @@ mod tests {
         started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         assert!(store.stored.lock().unwrap().is_none());
         let mut second_prepared = false;
-        let second = runtime.prepare_maintenance(|runtime| {
+        let second = runtime.prepare_maintenance(None, |runtime| {
             second_prepared = true;
             Ok(MaintenanceRequest::Enable {
                 key: Arc::new(runtime.key_provider.create().unwrap()),
@@ -1486,11 +1507,11 @@ mod tests {
 
         // A preparation failure must also release the gate for a retry.
         assert!(runtime
-            .prepare_maintenance(|_| Err("keychain unavailable".into()))
+            .prepare_maintenance(None, |_| Err("keychain unavailable".into()))
             .is_err());
         assert!(!runtime.maintenance.load(Ordering::SeqCst));
         assert!(runtime
-            .prepare_maintenance(|_| Ok(MaintenanceRequest::Disable))
+            .prepare_maintenance(None, |_| Ok(MaintenanceRequest::Disable))
             .is_ok());
     }
 
@@ -1553,7 +1574,7 @@ mod tests {
         runtime.maintenance.store(true, Ordering::SeqCst);
 
         let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _gate = MaintenanceGate(&runtime.maintenance);
+            let _gate = MaintenanceGate(&runtime.maintenance, None);
             panic!("maintenance blew up");
         }));
 

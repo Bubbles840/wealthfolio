@@ -4,12 +4,28 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { ProfileShell } from "./profile-shell";
 import { ProfileMenu } from "./profile-menu";
 const mocks = vi.hoisted(() => ({
+  isWeb: true,
+  changed: () => {},
+  ready: () => {},
+  databaseChanged: () => {},
   command: vi.fn(),
   admitted: vi.fn(() => true),
   reload: vi.fn(),
 }));
 vi.mock("@/lib/reload-application", () => ({ reloadApplication: mocks.reload }));
-vi.mock("@/adapters", () => ({ isWeb: true }));
+vi.mock("@/adapters", () => ({
+  get isWeb() {
+    return mocks.isWeb;
+  },
+}));
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: vi.fn(async (_event: string, callback: () => void) => {
+    if (_event === "profile-session-changed") mocks.changed = callback;
+    if (_event === "app:ready") mocks.ready = callback;
+    if (_event === "database-state-changed") mocks.databaseChanged = callback;
+    return () => {};
+  }),
+}));
 vi.mock("./api", () => ({ profileCommand: mocks.command }));
 vi.mock("./auth-bridge", () => ({ isNativeAuthPending: () => false }));
 vi.mock("./session", () => ({
@@ -32,8 +48,21 @@ const mount = () =>
       </ProfileShell>
     </QueryClientProvider>,
   );
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+  Reflect.deleteProperty(navigator, "clipboard");
+});
 beforeEach(() => {
+  vi.stubGlobal(
+    "Image",
+    class {
+      src = "";
+      decode() {
+        return Promise.resolve();
+      }
+    },
+  );
   vi.stubGlobal(
     "ResizeObserver",
     class {
@@ -43,6 +72,7 @@ beforeEach(() => {
     },
   );
   vi.clearAllMocks();
+  mocks.isWeb = true;
   mocks.command.mockResolvedValue(unlocked);
 });
 it.each(["Lock Wealthfolio", "Switch profile"])(
@@ -468,4 +498,117 @@ it("deletes the last profile and returns to an empty profile picker", async () =
     true,
   );
   expect(screen.queryByText("Private portfolio")).not.toBeInTheDocument();
+});
+
+it("keeps the native profile open when switching to another app", async () => {
+  mocks.isWeb = false;
+  mount();
+  expect(await screen.findByText("Private portfolio")).toBeInTheDocument();
+  const hidden = vi.spyOn(document, "hidden", "get").mockReturnValue(true);
+  try {
+    fireEvent(document, new Event("visibilitychange"));
+    expect(mocks.command).not.toHaveBeenCalledWith("lock_profile", expect.anything());
+    expect(screen.getByText("Private portfolio")).toBeInTheDocument();
+  } finally {
+    hidden.mockRestore();
+  }
+});
+
+it("does not poll native profile state after startup settles", async () => {
+  vi.useFakeTimers();
+  mocks.isWeb = false;
+  mount();
+  await act(async () => {});
+  expect(screen.getByText("Private portfolio")).toBeInTheDocument();
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(60_000);
+  });
+  expect(
+    mocks.command.mock.calls.filter(([command]) => command === "get_profile_state"),
+  ).toHaveLength(1);
+});
+
+it("reloads after native session subscription failure without admitting financial content", async () => {
+  mocks.isWeb = false;
+  const { listen } = await import("@tauri-apps/api/event");
+  vi.mocked(listen).mockRejectedValueOnce(new Error("Session subscription failed"));
+  mount();
+  const retry = await screen.findByRole("button", { name: "Retry" });
+  expect(listen).toHaveBeenCalledWith("profile-session-changed", expect.any(Function));
+  expect(mocks.command).not.toHaveBeenCalled();
+  expect(screen.queryByText("Private portfolio")).not.toBeInTheDocument();
+  fireEvent.click(retry);
+  await waitFor(() => expect(mocks.reload).toHaveBeenCalledTimes(1));
+  expect(mocks.command).not.toHaveBeenCalled();
+  expect(mocks.admitted).not.toHaveBeenCalled();
+  expect(screen.queryByText("Private portfolio")).not.toBeInTheDocument();
+});
+
+it("uses native startup and lock events without polling", async () => {
+  vi.useFakeTimers();
+  mocks.isWeb = false;
+  mocks.command.mockResolvedValueOnce({ profiles: [profile], session: null, starting: true });
+  mount();
+  await act(async () => {});
+  expect(screen.queryByText("Private portfolio")).not.toBeInTheDocument();
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(10_000);
+  });
+  expect(mocks.command).toHaveBeenCalledTimes(1);
+  await act(async () => mocks.ready());
+  expect(screen.getByText("Private portfolio")).toBeInTheDocument();
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(60_000);
+  });
+  expect(
+    mocks.command.mock.calls.filter(([command]) => command === "get_profile_state"),
+  ).toHaveLength(2);
+  mocks.command.mockResolvedValue({ ...unlocked, session: null });
+  await act(async () => {
+    mocks.changed();
+  });
+  expect(screen.queryByText("Private portfolio")).not.toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "Who's using Wealthfolio?" })).toBeInTheDocument();
+});
+
+it("continues polling web profile state", async () => {
+  vi.useFakeTimers();
+  mount();
+  await act(async () => {});
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(4000);
+  });
+  expect(
+    mocks.command.mock.calls.filter(([command]) => command === "get_profile_state"),
+  ).toHaveLength(3);
+});
+
+it("rereads native startup when readiness arrives during the initial request", async () => {
+  mocks.isWeb = false;
+  const initial = deferred<unknown>();
+  mocks.command.mockReturnValueOnce(initial.promise);
+  mount();
+  await waitFor(() => expect(mocks.command).toHaveBeenCalledOnce());
+  await act(async () => {
+    mocks.ready();
+    initial.resolve({ profiles: [profile], session: null, starting: true });
+  });
+  expect(await screen.findByText("Private portfolio")).toBeInTheDocument();
+  expect(mocks.command).toHaveBeenCalledTimes(2);
+});
+
+it("refreshes native admission after database maintenance while content is covered", async () => {
+  mocks.isWeb = false;
+  mount();
+  await screen.findByText("Private portfolio");
+  // A scoped read was rejected during teardown. Backend still holds the old
+  // session until maintenance completes and it can issue its replacement.
+  mocks.admitted.mockReturnValueOnce(false);
+  await act(async () => mocks.changed());
+  expect(screen.queryByText("Private portfolio")).not.toBeInTheDocument();
+  const replacement = { profileId: "a", scopeId: "rebuilt" };
+  mocks.command.mockResolvedValue({ ...unlocked, session: replacement });
+  await act(async () => mocks.databaseChanged());
+  expect(mocks.admitted).toHaveBeenLastCalledWith(replacement);
+  expect(screen.getByText("Private portfolio")).toBeInTheDocument();
 });

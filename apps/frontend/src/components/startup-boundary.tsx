@@ -2,13 +2,11 @@ import { Component, type ReactNode } from "react";
 import { Button } from "@wealthfolio/ui";
 import { useTranslation } from "react-i18next";
 import { logger } from "@/adapters";
-import { useNativePrivacyCover } from "@/features/profiles/use-native-privacy-cover";
 import { reloadApplication } from "@/lib/reload-application";
 import { StartupScreen } from "./startup-screen";
 
 function StartupFailure() {
   const { t } = useTranslation("common", { useSuspense: false });
-  useNativePrivacyCover(true);
   return (
     <StartupScreen
       profile={null}
