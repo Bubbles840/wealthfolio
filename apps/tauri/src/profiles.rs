@@ -481,7 +481,11 @@ pub async fn lock_profile(
             .cancel(NATIVE_OWNER)
             .map_err(|e| e.to_string())?;
     }
-    state.lock(&handle).await
+    let result = state.lock(&handle).await;
+    if let Err(error) = &result {
+        log::warn!("Profile lock failed: {error}");
+    }
+    result
 }
 
 #[tauri::command]

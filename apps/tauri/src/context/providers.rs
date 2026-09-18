@@ -725,6 +725,7 @@ async fn build_context(
 
     Ok(BuiltContext {
         context: ServiceContext {
+            portfolio_tasks: crate::listeners::PortfolioTasks::new(),
             sync_approvals: Default::default(),
             sync_lifecycle: tokio::sync::Mutex::new(()),
             active: std::sync::atomic::AtomicBool::new(true),

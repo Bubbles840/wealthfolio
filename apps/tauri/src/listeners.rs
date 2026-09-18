@@ -2,9 +2,10 @@ use futures::FutureExt;
 use log::{error, info, warn};
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
-use tauri::{async_runtime::spawn, AppHandle};
+use tauri::AppHandle;
+use tokio::task::JoinSet;
 use wealthfolio_core::health::HealthServiceTrait;
 use wealthfolio_core::portfolio::snapshot::{
     reconcile_quote_sync_from_latest_account_snapshots, snapshot_date_requires_remediation,
@@ -19,6 +20,31 @@ use crate::events::{
     MarketSyncResult, PortfolioRequestPayload, MARKET_SYNC_COMPLETE, MARKET_SYNC_ERROR,
     MARKET_SYNC_START, PORTFOLIO_UPDATE_COMPLETE, PORTFOLIO_UPDATE_ERROR, PORTFOLIO_UPDATE_START,
 };
+
+/// Portfolio requests belong to one runtime, including their calculation phase.
+pub struct PortfolioTasks(Mutex<Option<JoinSet<()>>>);
+
+impl PortfolioTasks {
+    pub fn new() -> Self {
+        Self(Mutex::new(Some(JoinSet::new())))
+    }
+
+    fn spawn(&self, task: impl Future<Output = ()> + Send + 'static) {
+        let mut tasks = self.0.lock().unwrap();
+        if let Some(tasks) = tasks.as_mut() {
+            while tasks.try_join_next().is_some() {}
+            tasks.spawn_on(task, tauri::async_runtime::handle().inner());
+        }
+    }
+
+    pub async fn stop(&self) {
+        // Taking the set also rejects late requests from commands already in flight.
+        let tasks = self.0.lock().unwrap().take();
+        if let Some(mut tasks) = tasks {
+            tasks.shutdown().await;
+        }
+    }
+}
 
 fn resolve_listener_account_ids(
     context: &Arc<ServiceContext>,
@@ -83,8 +109,9 @@ pub(crate) fn handle_portfolio_request(
     }
     let handle_clone = handle.clone(); // Clone handle for async block
 
-    // Spawn a task to handle the update/recalculate steps
-    spawn(async move {
+    let task_context = Arc::clone(&context);
+    context.portfolio_tasks.spawn(async move {
+        let context = task_context;
         let market_sync_mode = payload.market_sync_mode.clone();
         let accounts_to_recalc = payload.account_ids.clone();
         let since_date = payload.since_date;
@@ -186,7 +213,7 @@ pub(crate) fn handle_portfolio_request(
                             accounts_to_recalc,
                             snap_mode,
                             val_mode,
-                        );
+                        ).await;
                     }
                     Err(e) => {
                         if let Err(e_emit) = crate::events::emit_for_profile(
@@ -214,14 +241,14 @@ pub(crate) fn handle_portfolio_request(
                     accounts_to_recalc,
                     snap_mode,
                     val_mode,
-                );
+                ).await;
             }
         }
     });
 }
 
 // This function handles the portfolio snapshot and history calculation logic
-fn handle_portfolio_calculation(
+async fn handle_portfolio_calculation(
     app_handle: AppHandle,
     context: Arc<ServiceContext>,
     account_ids_input: Option<Vec<String>>,
@@ -234,48 +261,19 @@ fn handle_portfolio_calculation(
         error!("Failed to emit {} event: {}", PORTFOLIO_UPDATE_START, e);
     }
 
-    spawn(async move {
-        let account_service = context.account_service();
-        let snapshot_service = context.snapshot_service();
-        let valuation_service = context.valuation_service();
+    let account_service = context.account_service();
+    let snapshot_service = context.snapshot_service();
+    let valuation_service = context.valuation_service();
 
-        // Step 0: Resolve account scope. Specific requests are processed as-is;
-        // full recalculations rebuild every non-archived account, including closed accounts.
-        let account_ids: Vec<String> = if let Some(target_ids) = account_ids_input {
-            target_ids
-        } else {
-            match account_service.get_non_archived_accounts() {
-                Ok(accounts) => accounts.into_iter().map(|a| a.id).collect(),
-                Err(e) => {
-                    let err_msg = format!("Failed to list non-archived accounts: {}", e);
-                    error!("{}", err_msg);
-                    if let Err(e_emit) = crate::events::emit_for_profile(
-                        &app_handle,
-                        &context,
-                        PORTFOLIO_UPDATE_ERROR,
-                        &err_msg,
-                    ) {
-                        error!(
-                            "Failed to emit {} event: {}",
-                            PORTFOLIO_UPDATE_ERROR, e_emit
-                        );
-                    }
-                    return;
-                }
-            }
-        };
-
-        // --- Step 1: Calculate Account-Specific Snapshots ---
-        if !account_ids.is_empty() {
-            let account_snapshot_result = snapshot_service
-                .recalculate_holdings_snapshots(Some(account_ids.as_slice()), snapshot_mode.clone())
-                .await;
-
-            if let Err(e) = account_snapshot_result {
-                let err_msg = format!(
-                    "calculate_holdings_snapshots for targeted accounts failed: {}",
-                    e
-                );
+    // Step 0: Resolve account scope. Specific requests are processed as-is;
+    // full recalculations rebuild every non-archived account, including closed accounts.
+    let account_ids: Vec<String> = if let Some(target_ids) = account_ids_input {
+        target_ids
+    } else {
+        match account_service.get_non_archived_accounts() {
+            Ok(accounts) => accounts.into_iter().map(|a| a.id).collect(),
+            Err(e) => {
+                let err_msg = format!("Failed to list non-archived accounts: {}", e);
                 error!("{}", err_msg);
                 if let Err(e_emit) = crate::events::emit_for_profile(
                     &app_handle,
@@ -288,83 +286,151 @@ fn handle_portfolio_calculation(
                         PORTFOLIO_UPDATE_ERROR, e_emit
                     );
                 }
+                return;
             }
         }
+    };
 
-        // --- Step 2: Update position status from latest real-account snapshots ---
-        let quote_service = context.quote_service();
-        let quote_reconciliation_account_ids = resolve_listener_account_ids(&context, None)
-            .unwrap_or_else(|err| {
-                warn!(
-                    "Failed to resolve accounts for quote sync reconciliation: {}",
-                    err
+    // --- Step 1: Calculate Account-Specific Snapshots ---
+    if !account_ids.is_empty() {
+        let account_snapshot_result = snapshot_service
+            .recalculate_holdings_snapshots(Some(account_ids.as_slice()), snapshot_mode.clone())
+            .await;
+
+        if let Err(e) = account_snapshot_result {
+            let err_msg = format!(
+                "calculate_holdings_snapshots for targeted accounts failed: {}",
+                e
+            );
+            error!("{}", err_msg);
+            if let Err(e_emit) = crate::events::emit_for_profile(
+                &app_handle,
+                &context,
+                PORTFOLIO_UPDATE_ERROR,
+                &err_msg,
+            ) {
+                error!(
+                    "Failed to emit {} event: {}",
+                    PORTFOLIO_UPDATE_ERROR, e_emit
                 );
-                Vec::new()
-            });
-        if let Err(e) = reconcile_quote_sync_from_latest_account_snapshots(
-            snapshot_service.as_ref(),
-            quote_service.as_ref(),
-            &quote_reconciliation_account_ids,
-        )
-        .await
-        {
+            }
+        }
+    }
+
+    // --- Step 2: Update position status from latest real-account snapshots ---
+    let quote_service = context.quote_service();
+    let quote_reconciliation_account_ids = resolve_listener_account_ids(&context, None)
+        .unwrap_or_else(|err| {
             warn!(
+                "Failed to resolve accounts for quote sync reconciliation: {}",
+                err
+            );
+            Vec::new()
+        });
+    if let Err(e) = reconcile_quote_sync_from_latest_account_snapshots(
+        snapshot_service.as_ref(),
+        quote_service.as_ref(),
+        &quote_reconciliation_account_ids,
+    )
+    .await
+    {
+        warn!(
                 "Failed to update position status from holdings: {}. Quote sync planning may be affected.",
                 e
             );
-        }
+    }
 
-        // --- Step 3: Calculate Valuation History ---
-        let accounts_for_valuation = account_ids;
+    // --- Step 3: Calculate Valuation History ---
+    let accounts_for_valuation = account_ids;
 
-        if !accounts_for_valuation.is_empty() {
-            match valuation_service
-                .calculate_valuation_histories(&accounts_for_valuation, valuation_mode)
-                .await
-            {
-                Ok(outcome) => {
-                    for failure in outcome.failures {
-                        error!(
-                            "Failed to calculate valuation history for account '{}': {}",
-                            failure.account_id, failure.message
-                        );
-                        if let Err(emit_error) = crate::events::emit_for_profile(
-                            &app_handle,
-                            &context,
-                            PORTFOLIO_UPDATE_ERROR,
-                            &failure,
-                        ) {
-                            error!("Failed to emit portfolio error: {}", emit_error);
-                        }
-                    }
-                }
-                Err(error) => {
-                    let message = format!("Failed to load shared valuation facts: {}", error);
-                    error!("{}", message);
-                    let _ = crate::events::emit_for_profile(
+    if !accounts_for_valuation.is_empty() {
+        match valuation_service
+            .calculate_valuation_histories(&accounts_for_valuation, valuation_mode)
+            .await
+        {
+            Ok(outcome) => {
+                for failure in outcome.failures {
+                    error!(
+                        "Failed to calculate valuation history for account '{}': {}",
+                        failure.account_id, failure.message
+                    );
+                    if let Err(emit_error) = crate::events::emit_for_profile(
                         &app_handle,
                         &context,
                         PORTFOLIO_UPDATE_ERROR,
-                        &message,
-                    );
+                        &failure,
+                    ) {
+                        error!("Failed to emit portfolio error: {}", emit_error);
+                    }
                 }
             }
+            Err(error) => {
+                let message = format!("Failed to load shared valuation facts: {}", error);
+                error!("{}", message);
+                let _ = crate::events::emit_for_profile(
+                    &app_handle,
+                    &context,
+                    PORTFOLIO_UPDATE_ERROR,
+                    &message,
+                );
+            }
         }
+    }
 
-        context.health_service().clear_cache().await;
+    context.health_service().clear_cache().await;
 
-        if let Err(e) =
-            crate::events::emit_for_profile(&app_handle, &context, PORTFOLIO_UPDATE_COMPLETE, ())
-        {
-            error!("Failed to emit {} event: {}", PORTFOLIO_UPDATE_COMPLETE, e);
-        }
-    });
+    if let Err(e) =
+        crate::events::emit_for_profile(&app_handle, &context, PORTFOLIO_UPDATE_COMPLETE, ())
+    {
+        error!("Failed to emit {} event: {}", PORTFOLIO_UPDATE_COMPLETE, e);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::NaiveDate;
+
+    #[test]
+    fn portfolio_requests_can_start_outside_a_tokio_thread() {
+        let tasks = PortfolioTasks::new();
+        let (started, receiver) = std::sync::mpsc::channel();
+        tasks.spawn(async move {
+            started.send(()).unwrap();
+        });
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        tauri::async_runtime::block_on(tasks.stop());
+    }
+
+    #[tokio::test]
+    async fn locking_joins_portfolio_work_before_the_writer_closes() {
+        let tasks = PortfolioTasks::new();
+        let runtime_owner = Arc::new(());
+        let task_owner = runtime_owner.clone();
+        let (started, started_rx) = tokio::sync::oneshot::channel();
+        tasks.spawn(async move {
+            let _owner = task_owner;
+            started.send(()).unwrap();
+            // A refresh waiting on a provider must not retain the profile at lock.
+            std::future::pending::<()>().await;
+        });
+        started_rx.await.unwrap();
+        assert_eq!(Arc::strong_count(&runtime_owner), 2);
+        tasks.stop().await;
+        // This is the ownership condition teardown needs before closing the writer.
+        assert_eq!(Arc::strong_count(&runtime_owner), 1);
+
+        // An already-admitted command cannot launch new work after shutdown.
+        let late_owner = runtime_owner.clone();
+        tasks.spawn(async move {
+            let _owner = late_owner;
+            std::future::pending::<()>().await;
+        });
+        assert_eq!(Arc::strong_count(&runtime_owner), 1);
+        tasks.stop().await;
+    }
 
     #[tokio::test]
     async fn market_sync_panic_becomes_safe_error_and_allows_next_refresh() {

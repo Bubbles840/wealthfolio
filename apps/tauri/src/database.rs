@@ -882,6 +882,9 @@ impl DatabaseRuntime {
             let _ = worker.await;
         }
 
+        // Portfolio requests can outlive their caller; join them before closing the writer.
+        context.portfolio_tasks.stop().await;
+
         // Startup and outbox workers can start the engine, so stop and join
         // them first. Then wait for the engine to release its own services.
         #[cfg(feature = "device-sync")]

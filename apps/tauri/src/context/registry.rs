@@ -28,6 +28,7 @@ use super::TauriAiEnvironment;
 use crate::services::ConnectService;
 
 pub struct ServiceContext {
+    pub portfolio_tasks: crate::listeners::PortfolioTasks,
     pub sync_approvals: crate::commands::device_sync::SyncApprovals,
     pub sync_lifecycle: tokio::sync::Mutex<()>,
     pub active: AtomicBool,
