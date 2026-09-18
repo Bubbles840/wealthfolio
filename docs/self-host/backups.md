@@ -239,6 +239,62 @@ space, permissions, key or configuration errors before retrying. Do not replace
 files underneath a running server. A failed operation may have rolled back to
 the previous database; verify its contents before another restore.
 
+### Profile registry startup failures
+
+If the server cannot open its profile registry, it logs the cause and the
+absolute data directory, then exits with a nonzero status. It does not serve a
+browser recovery screen or reset the installation. The `Listening on` message
+appears only after server initialization succeeds.
+
+The registry lives beside `WF_DB_PATH`, in `profiles.json` and
+`profiles.json.bak`. These paths are inside the container when using Docker;
+check the corresponding host bind mount or named volume. A valid backup registry
+is used automatically if the primary cannot be read. Startup stops if neither
+can be read, or both are missing while existing profile directories remain.
+
+For the repository's Compose setup, inspect the error and stop the service:
+
+```sh
+docker compose --env-file .env.docker logs --tail=100 wealthfolio
+docker compose --env-file .env.docker stop wealthfolio
+```
+
+Use the same Compose files and environment file as your deployment. Disable any
+external supervisor that could restart it during recovery.
+
+1. Check the logged cause first: verify the intended mount, ownership and write
+   permissions, and stop any other instance using the same directory. A process
+   lock error does not mean the registry is damaged.
+2. With all writers stopped, preserve the complete data directory and any
+   externally configured database, vault or addon paths. Include both registry
+   files, `profiles/`, the legacy database and its sidecars, encrypted secrets,
+   backups and recovery archives. Retain the configuration and matching master
+   key separately.
+3. If metadata is missing or damaged, restore a known-good registry backup from
+   this installation as `profiles.json`, with service-user ownership. It must
+   match the retained profile directories and configured legacy database path.
+   Do not invent profile IDs, handcraft an empty registry or delete profile
+   directories to bypass the error. A database-only backup does not restore the
+   profile registry.
+4. Start one instance, inspect its logs and verify the expected profiles and
+   data before re-enabling automatic restarts.
+
+### Start fresh while preserving the old installation
+
+If you prefer a new installation, first stop the failed one and preserve it as
+described above. Configure a **new, empty data directory or separate Docker
+volume**, and point `WF_DB_PATH` into it. Changing only the database filename in
+the same directory is insufficient: it still selects the same profile registry.
+Update explicit `WF_SECRET_FILE` and addon paths too, so the new installation
+does not write to the old vault or addon directory. Keep the old volume, files,
+configuration and master key; do not remove them to make startup succeed.
+
+Configure the new installation's master key, authentication and encryption
+policy before starting it. Normal first startup creates its initial profile.
+This does not recover the old profiles or their data. To import a portable
+export, stop the new server after its first successful startup and follow the
+[offline restore instructions](#restore-on-a-server-offline).
+
 ### Server cannot start
 
 There is no server web recovery screen. If startup fails:

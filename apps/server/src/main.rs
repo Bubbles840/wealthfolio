@@ -131,12 +131,15 @@ async fn main() -> anyhow::Result<()> {
     } else {
         tracing::info!("Authentication disabled");
     }
-    tracing::info!("Listening on {}", config.listen_addr);
     let static_dir = std::path::PathBuf::from(&config.static_dir);
     let router = api::app_router_from_config(&config)
-        .await?
+        .await
+        .inspect_err(|error| {
+            tracing::error!(error = %format!("{error:#}"), "Server startup failed; no requests were served");
+        })?
         .fallback_service(static_files::router(&static_dir))
         .layer(axum::middleware::from_fn(api::security_headers));
+    tracing::info!("Listening on {}", listener.local_addr()?);
     let result = axum::serve(
         listener,
         router.into_make_service_with_connect_info::<std::net::SocketAddr>(),

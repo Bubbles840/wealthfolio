@@ -119,9 +119,17 @@ server and devices, and failure recovery, see
 and portable backup passwords are separate protections; that guide explains
 which key each requires.
 
-Back up the database and encrypted vault, and retain the matching master key in
-a separately protected recovery location. Check that the backup process can read
-the required files. A lost master key cannot be recovered from the vault.
+Back up the complete data directory, including `profiles.json`,
+`profiles.json.bak`, the `profiles/` directory, the legacy database and
+encrypted vault. Include any database, vault or addon paths configured outside
+that directory, and retain the matching master key in a separately protected
+recovery location. Check that the backup process can read the required files. A
+lost master key cannot be recovered from the vault.
+
+Profile registry failures stop server startup; there is no browser recovery
+screen. Check the server logs and follow
+[profile registry recovery](backups.md#profile-registry-startup-failures). The
+guide also explains how to start fresh without discarding the old installation.
 
 Use one server process per vault. Stop the old instance before starting its
 replacement when both use the same vault; overlapping rolling updates can lose

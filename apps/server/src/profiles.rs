@@ -5,6 +5,7 @@ use crate::{
     config::Config,
     main_lib::{build_profile_state, AppState},
 };
+use anyhow::Context;
 use axum::{
     body::Body,
     extract::{Path, State},
@@ -66,11 +67,22 @@ impl WebProfiles {
             })?;
             anyhow::ensure!(!has_credentials, "The default database is missing. Restore its file before starting; existing credentials were preserved.");
         }
-        let registry = Arc::new(ProfileRegistry::open(
-            directory.to_path_buf(),
-            db,
-            Arc::new(store),
-        )?);
+        let registry_directory = std::path::absolute(directory)?;
+        let registry = Arc::new(
+            ProfileRegistry::open(directory.to_path_buf(), db, Arc::new(store)).with_context(
+                || {
+                    format!(
+                    "Cannot open the profile registry in {} (profiles.json and profiles.json.bak). \
+                     Stop the service and automatic restarts. Check the data mount, permissions, \
+                     and whether another instance is running. If registry files are missing or \
+                     damaged, preserve the complete data directory before restoring a matching \
+                     registry backup. Do not delete profile directories or credentials. \
+                     Recovery guide: docs/self-host/backups.md#profile-registry-startup-failures",
+                    registry_directory.display()
+                )
+                },
+            )?,
+        );
         registry.set_legacy_addons_root(std::path::PathBuf::from(&config.addons_root))?;
         for id in registry.pending_deletions()? {
             if registry.finish_delete(id).is_err() {
