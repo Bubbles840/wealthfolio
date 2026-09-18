@@ -335,9 +335,12 @@ is `(teamId, userId)`; profiles are local and never sent as cloud identities.
 
 Automatic cloud admission re-fetches the verified user/team binding, even when
 its access token has not changed. This applies to foreground requests and queued
-broker sync. Missing legacy ownership or changed membership pauses cloud work
-and requires explicit reconnection; automatic restoration never adopts a
-binding. A user/team preflight is not atomic with the subsequent cloud request.
+broker sync. The adopted legacy profile establishes its initial binding from
+its server-verified existing session, or its first verified login if signed out,
+without clearing broker links or device enrollment. The legacy format did not
+record an owner, so that first identity becomes its baseline. Unbound nonlegacy
+profiles and changed membership still require explicit reconnection.
+A user/team preflight is not atomic with the subsequent cloud request.
 Preventing membership changes between those requests requires a cloud API
 contract that checks the expected user/team on the operation itself; the current
 API does not provide that guarantee.
@@ -353,9 +356,9 @@ Confirmation revalidates the candidate against the cloud. Duplicate local
 account reservations remain forbidden, including confirmed requests. Ordinary
 sign-out keeps the last binding so reconnecting the same account retains
 enrollment and switching to another account cannot reuse its keys or cursors.
-Unbound migrated profiles with existing cloud credentials or enrollment also
-require confirmation and cleanup, because ownership of that existing state has
-not been verified.
+Unbound nonlegacy profiles with existing cloud credentials or enrollment still
+require confirmation and cleanup. The legacy migration exception does not
+bypass the post-restore reconnect gate or its credential cleanup.
 
 A confirmed change excludes in-flight profile commands, reserves broker sync,
 and serializes login/logout/token refresh. Pairing key writes must match the

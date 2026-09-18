@@ -206,13 +206,15 @@ impl TokenLifecycleState {
         let changed = registry
             .connect_rebind_required(profile_id, &binding)
             .map_err(|e| e.to_string())?;
-        // An offline-migrated installation may have cloud state but no verified
-        // owner yet. Never attach unknown old enrollment to a new login silently.
-        let unverified_existing_state = registry
-            .profile(profile_id)
-            .map_err(|e| e.to_string())?
-            .connect
-            .is_none()
+        let profile = registry.profile(profile_id).map_err(|e| e.to_string())?;
+        // The adopted legacy database predates account bindings. Its first
+        // verified login establishes ownership without resetting existing links
+        // or enrollment. Restored databases still require the reconnect cleanup.
+        let unverified_existing_state = profile.connect.is_none()
+            && (profile.legacy_database.is_none()
+                || settings
+                    .requires_cloud_reconnect()
+                    .map_err(|e| e.to_string())?)
             && [
                 SYNC_IDENTITY_KEY,
                 CLOUD_REFRESH_TOKEN_KEY,
@@ -861,7 +863,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn automatic_admission_does_not_bind_unknown_legacy_cloud_state() {
+    async fn automatic_admission_does_not_bind_unknown_nonlegacy_cloud_state() {
         let (url, server) =
             serve_binding_responses(vec![r#"{"id":"user","team":{"id":"current-team"}}"#]);
         let root =
@@ -884,7 +886,7 @@ mod tests {
         let result = admit_profile_binding("unchanged-token", &config, &url, &registry, id).await;
         assert!(
             result.unwrap_err().starts_with("CONNECT_REBIND_REQUIRED"),
-            "legacy ownership must require explicit confirmed reconnect"
+            "unknown nonlegacy ownership must require explicit confirmed reconnect"
         );
         assert!(registry.profile(id).unwrap().connect.is_none());
         assert_eq!(
@@ -899,6 +901,188 @@ mod tests {
             Some("legacy-refresh")
         );
         server.join().unwrap();
+        drop(registry);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn legacy_admission_migrates_existing_session_without_resetting_enrollment() {
+        let (url, server) = serve_binding_responses(vec![
+            r#"{"id":"reserved-user","team":{"id":"team"}}"#,
+            r#"{"id":"user","team":{"id":"team"}}"#,
+            r#"{"id":"user","team":{"id":"other-team"}}"#,
+        ]);
+        let root = std::env::temp_dir().join(format!("wf-legacy-session-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("db"), b"legacy database").unwrap();
+        let store = Arc::new(MemorySecrets::default());
+        let registry = wealthfolio_core::profiles::ProfileRegistry::open(
+            root.clone(),
+            root.join("db"),
+            store.clone(),
+        )
+        .unwrap();
+        let id = registry.default_id().unwrap();
+        for key in [
+            SYNC_IDENTITY_KEY,
+            LEGACY_SYNC_DEVICE_ID_KEY,
+            CLOUD_REFRESH_TOKEN_KEY,
+        ] {
+            store.set_secret(key, "preserved").unwrap();
+        }
+        let config = TokenLifecycleConfig::new(url.clone(), "test-key".into());
+        let other = registry
+            .create("Other", wealthfolio_core::profiles::PROFILE_AVATARS[0])
+            .unwrap();
+        registry
+            .bind_connect(
+                other.id,
+                wealthfolio_core::profiles::ConnectBinding {
+                    issuer: url.clone(),
+                    user_id: "reserved-user".into(),
+                    team_id: Some("team".into()),
+                },
+            )
+            .unwrap();
+        assert!(
+            admit_profile_binding("unchanged-token", &config, &url, &registry, id)
+                .await
+                .is_err()
+        );
+        assert!(registry.profile(id).unwrap().connect.is_none());
+        admit_profile_binding("unchanged-token", &config, &url, &registry, id)
+            .await
+            .unwrap();
+        assert_eq!(
+            registry
+                .profile(id)
+                .unwrap()
+                .connect
+                .unwrap()
+                .team_id
+                .as_deref(),
+            Some("team")
+        );
+        assert!(
+            admit_profile_binding("unchanged-token", &config, &url, &registry, id)
+                .await
+                .unwrap_err()
+                .starts_with("CONNECT_REBIND_REQUIRED")
+        );
+        for key in [
+            SYNC_IDENTITY_KEY,
+            LEGACY_SYNC_DEVICE_ID_KEY,
+            CLOUD_REFRESH_TOKEN_KEY,
+        ] {
+            assert_eq!(store.get_secret(key).unwrap().as_deref(), Some("preserved"));
+        }
+        server.join().unwrap();
+        drop(registry);
+        let reopened =
+            wealthfolio_core::profiles::ProfileRegistry::open(root.clone(), root.join("db"), store)
+                .unwrap();
+        assert_eq!(
+            reopened
+                .profile(id)
+                .unwrap()
+                .connect
+                .unwrap()
+                .team_id
+                .as_deref(),
+            Some("team")
+        );
+        drop(reopened);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn legacy_first_login_preserves_state_and_later_account_changes_require_confirmation() {
+        use wealthfolio_core::profiles::{ConnectBinding, ProfileRegistry};
+        let root = std::env::temp_dir().join(format!("wf-legacy-login-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("db"), b"legacy database").unwrap();
+        let store = Arc::new(MemorySecrets::default());
+        let registry = ProfileRegistry::open(root.clone(), root.join("db"), store.clone()).unwrap();
+        let id = registry.default_id().unwrap();
+        for key in [SYNC_IDENTITY_KEY, LEGACY_SYNC_DEVICE_ID_KEY] {
+            store.set_secret(key, "preserved").unwrap();
+        }
+        let state = TokenLifecycleState::new();
+        let settings = BindingSettings {
+            required: AtomicBool::new(false),
+        };
+        let binding = ConnectBinding {
+            issuer: "issuer".into(),
+            user_id: "user".into(),
+            team_id: Some("team".into()),
+        };
+        // A restored database must not be mistaken for an ordinary upgrade.
+        settings.required.store(true, Ordering::SeqCst);
+        assert!(state
+            .commit_profile_login(
+                store.as_ref(),
+                &settings,
+                &registry,
+                id,
+                "candidate",
+                "rotated".into(),
+                binding.clone(),
+                false,
+                || async { panic!("restore cleanup requires confirmation") },
+            )
+            .await
+            .unwrap_err()
+            .starts_with("CONNECT_REBIND_REQUIRED"));
+        assert!(registry.profile(id).unwrap().connect.is_none());
+        settings.required.store(false, Ordering::SeqCst);
+        // A signed-out legacy installation has enrollment but no refresh token.
+        for _ in 0..2 {
+            state
+                .commit_profile_login(
+                    store.as_ref(),
+                    &settings,
+                    &registry,
+                    id,
+                    "candidate",
+                    "rotated".into(),
+                    binding.clone(),
+                    false,
+                    || async { panic!("migration must not clear broker or sync state") },
+                )
+                .await
+                .unwrap();
+        }
+        assert_eq!(registry.profile(id).unwrap().connect, Some(binding.clone()));
+        assert!(!settings.required.load(Ordering::SeqCst));
+        let changed = ConnectBinding {
+            user_id: "other-user".into(),
+            ..binding
+        };
+        assert!(state
+            .commit_profile_login(
+                store.as_ref(),
+                &settings,
+                &registry,
+                id,
+                "other",
+                "other-rotated".into(),
+                changed,
+                false,
+                || async { panic!("account changes require confirmation") },
+            )
+            .await
+            .unwrap_err()
+            .starts_with("CONNECT_REBIND_REQUIRED"));
+        for key in [SYNC_IDENTITY_KEY, LEGACY_SYNC_DEVICE_ID_KEY] {
+            assert_eq!(store.get_secret(key).unwrap().as_deref(), Some("preserved"));
+        }
+        assert_eq!(
+            store
+                .get_secret(CLOUD_REFRESH_TOKEN_KEY)
+                .unwrap()
+                .as_deref(),
+            Some("rotated")
+        );
         drop(registry);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -1457,8 +1641,9 @@ pub async fn verified_profile_binding(
 }
 
 /// Verify mutable cloud membership before admitting automatic cloud work.
-/// Access-token equality does not establish team identity. Only explicit login
-/// may establish or replace a binding, after confirmation/cleanup when needed.
+/// Access-token equality does not establish team identity. A legacy profile's
+/// existing session may establish its initial binding; replacing a binding
+/// requires explicit login and confirmation/cleanup.
 /// This preflight cannot make a subsequent cloud request atomic with membership
 /// changes; that requires an expected-scope check in the cloud API contract.
 pub async fn admit_profile_binding(
@@ -1469,12 +1654,16 @@ pub async fn admit_profile_binding(
     profile_id: uuid::Uuid,
 ) -> Result<(), String> {
     let binding = verified_profile_binding(access_token, config, api_url).await?;
-    let previous = registry
-        .profile(profile_id)
-        .map_err(|e| e.to_string())?
-        .connect;
+    let profile = registry.profile(profile_id).map_err(|e| e.to_string())?;
+    if profile.connect.is_none() && profile.legacy_database.is_some() {
+        // The server has verified the inherited session. Bind atomically so
+        // duplicate-account reservations and concurrent bindings stay enforced.
+        return registry
+            .bind_connect(profile_id, binding)
+            .map_err(|e| e.to_string());
+    }
     // Also enforce the installation's one-profile-per-account reservation.
-    if previous.is_none()
+    if profile.connect.is_none()
         || registry
             .connect_rebind_required(profile_id, &binding)
             .map_err(|e| e.to_string())?
