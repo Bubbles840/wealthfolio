@@ -1,3 +1,4 @@
+/* Shared motion, eye artwork, and style-specific overrides. Layout uses Tailwind. */
 .profile-line-eyes {
   transform-box: fill-box;
   transform-origin: center;
@@ -45,15 +46,9 @@
 }
 
 .profile-sculpture-eye-position {
-  position: absolute;
   transform: translate(-50%, -50%) rotate(-20deg);
 }
 .profile-sculpture-eye {
-  display: block;
-  width: 100%;
-  height: 100%;
-  overflow: hidden;
-  border-radius: 50%;
   background: radial-gradient(at 35% 25%, #fff3dc, #e0c9a6);
   box-shadow:
     inset -1px -1px 2px #79695630,
@@ -61,13 +56,6 @@
   animation: profile-sculpture-blink 6.7s var(--sculpture-eye-delay, 0s) infinite;
 }
 .profile-sculpture-pupil {
-  display: block;
-  position: relative;
-  left: 28%;
-  top: 21%;
-  width: 47%;
-  height: 60%;
-  border-radius: 50%;
   background: radial-gradient(at 35% 20%, #41434a, #171a24);
   animation: profile-sculpture-gaze 8s var(--sculpture-eye-delay, 0s) ease-in-out infinite;
 }
@@ -130,21 +118,8 @@
   background: radial-gradient(at 35% 25%, #fff2d1, #edca75);
 }
 
-.profile-pixel-avatar {
-  image-rendering: pixelated;
-}
 .profile-pixel-eye-position {
-  position: absolute;
-  width: 6%;
-  height: 9%;
   transform: translate(-50%, -50%);
-}
-.profile-pixel-gaze,
-.profile-pixel-blink,
-.profile-pixel-eye {
-  display: block;
-  width: 100%;
-  height: 100%;
 }
 .profile-pixel-gaze {
   animation: profile-pixel-look 8s var(--pixel-eye-delay, 0s) steps(1, end) infinite;
@@ -270,4 +245,12 @@
     transform: none;
     transition: none;
   }
+}
+
+/* The loading screen uses the same artwork without movement. */
+.profile-avatar-static,
+.profile-avatar-static * {
+  animation: none !important;
+  transition: none !important;
+  pointer-events: none;
 }

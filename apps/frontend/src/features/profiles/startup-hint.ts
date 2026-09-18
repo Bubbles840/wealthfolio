@@ -1,5 +1,5 @@
 import type { ProfileSummary } from "./api";
-import { PROFILE_AVATARS } from "./profile-avatar";
+import { PROFILE_AVATARS } from "./avatar-catalog";
 
 const STARTUP_HINT_KEY = "wealthfolio-profile-opening";
 const MAX_AGE_MS = 5 * 60 * 1000;
