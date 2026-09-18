@@ -14,7 +14,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
-const MIN_PASSWORD_LENGTH: usize = 8;
+const MIN_PASSWORD_LENGTH: usize = 4;
 const MAX_PASSWORD_LENGTH: usize = 128;
 
 const REGISTRY_FILE: &str = "profiles.json";
@@ -137,7 +137,7 @@ fn read_registry(path: &Path) -> ProfileResult<RegistryData> {
         serde_json::from_slice(&fs::read(path).map_err(storage_error)?).map_err(storage_error)?;
     for profile in &mut data.profiles {
         if RETIRED_AVATARS.contains(&profile.avatar_id.as_str()) {
-            profile.avatar_id = PROFILE_AVATARS[0].into();
+            profile.avatar_id = DEFAULT_PROFILE_AVATAR.into();
         }
     }
     validate_data(&data)?;
@@ -223,7 +223,7 @@ impl ProfileRegistry {
             let profile = Profile {
                 id,
                 name: "Personal".into(),
-                avatar_id: PROFILE_AVATARS[0].into(),
+                avatar_id: DEFAULT_PROFILE_AVATAR.into(),
                 lock_enabled: false,
                 legacy_database: legacy_database.exists().then_some(legacy_database),
                 legacy_addons_root: None,
@@ -508,13 +508,24 @@ impl ProfileRegistry {
     }
 
     pub fn create(&self, name: &str, avatar: &str) -> ProfileResult<ProfileSummary> {
+        self.create_with_password(name, avatar, None)
+            .map(|(profile, _)| profile)
+    }
+
+    pub fn create_with_password(
+        &self,
+        name: &str,
+        avatar: &str,
+        password: Option<&str>,
+    ) -> ProfileResult<(ProfileSummary, Option<String>)> {
         validate_name(name, avatar)?;
+        let (record, recovery) = new_lock_record(password)?;
         let mut data = self.data()?;
         let profile = Profile {
             id: Uuid::new_v4(),
             name: name.trim().into(),
             avatar_id: avatar.into(),
-            lock_enabled: false,
+            lock_enabled: password.is_some(),
             legacy_database: None,
             legacy_addons_root: None,
             connect: None,
@@ -524,8 +535,12 @@ impl ProfileRegistry {
         if next.default_profile_id.is_none() {
             next.default_profile_id = Some(profile.id);
         }
+        if password.is_some() {
+            // Do not publish a protected profile until its credential is saved.
+            self.write_lock(&profile, &record)?;
+        }
         self.save(&mut data, next)?;
-        Ok(ProfileSummary::from(&profile))
+        Ok((ProfileSummary::from(&profile), recovery))
     }
 
     pub fn update(&self, id: Uuid, name: &str, avatar: &str) -> ProfileResult<()> {
@@ -741,13 +756,6 @@ impl ProfileRegistry {
         proof: Option<&str>,
         password: Option<&str>,
     ) -> ProfileResult<Option<String>> {
-        if password.is_some_and(|p| {
-            !(MIN_PASSWORD_LENGTH..=MAX_PASSWORD_LENGTH).contains(&p.chars().count())
-        }) {
-            return Err(ProfileError::Invalid(format!(
-                "Use {MIN_PASSWORD_LENGTH}–{MAX_PASSWORD_LENGTH} characters for your password."
-            )));
-        }
         let mut data = self.data()?;
         let profile = data
             .profiles
@@ -756,33 +764,7 @@ impl ProfileRegistry {
             .ok_or(ProfileError::NotFound)?;
         let mut current = self.read_lock(profile)?;
         self.verify_record(profile, &mut current, proof)?;
-        let (record, recovery) = if let Some(password) = password {
-            let params = Params::new(19 * 1024, 2, 1, Some(32)).map_err(storage_error)?;
-            let salt = SaltString::generate(&mut OsRng);
-            let verifier = Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
-                .hash_password(password.as_bytes(), &salt)
-                .map_err(storage_error)?
-                .to_string();
-            let mut bytes = [0u8; 16];
-            OsRng.fill_bytes(&mut bytes);
-            let code = hex::encode_upper(bytes);
-            let formatted = code
-                .as_bytes()
-                .chunks(4)
-                .map(|part| std::str::from_utf8(part).unwrap())
-                .collect::<Vec<_>>()
-                .join("-");
-            (
-                LockRecord {
-                    verifier: Some(verifier),
-                    recovery_hash: Some(recovery_hash(&code)),
-                    ..Default::default()
-                },
-                Some(formatted),
-            )
-        } else {
-            (LockRecord::default(), None)
-        };
+        let (record, recovery) = new_lock_record(password)?;
         self.write_lock(profile, &record)?;
         // Invalidate before registry I/O: a saved credential change stays effective
         // even if the display hint cannot be updated.
@@ -796,6 +778,44 @@ impl ProfileRegistry {
         self.save(&mut data, next)?;
         Ok(recovery)
     }
+}
+
+fn new_lock_record(password: Option<&str>) -> ProfileResult<(LockRecord, Option<String>)> {
+    if password
+        .is_some_and(|p| !(MIN_PASSWORD_LENGTH..=MAX_PASSWORD_LENGTH).contains(&p.chars().count()))
+    {
+        return Err(ProfileError::Invalid(format!(
+            "Use {MIN_PASSWORD_LENGTH}–{MAX_PASSWORD_LENGTH} characters for your password."
+        )));
+    }
+    let (record, recovery) = if let Some(password) = password {
+        let params = Params::new(19 * 1024, 2, 1, Some(32)).map_err(storage_error)?;
+        let salt = SaltString::generate(&mut OsRng);
+        let verifier = Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
+            .hash_password(password.as_bytes(), &salt)
+            .map_err(storage_error)?
+            .to_string();
+        let mut bytes = [0u8; 16];
+        OsRng.fill_bytes(&mut bytes);
+        let code = hex::encode_upper(bytes);
+        let formatted = code
+            .as_bytes()
+            .chunks(4)
+            .map(|part| std::str::from_utf8(part).unwrap())
+            .collect::<Vec<_>>()
+            .join("-");
+        (
+            LockRecord {
+                verifier: Some(verifier),
+                recovery_hash: Some(recovery_hash(&code)),
+                ..Default::default()
+            },
+            Some(formatted),
+        )
+    } else {
+        (LockRecord::default(), None)
+    };
+    Ok((record, recovery))
 }
 
 fn recovery_hash(code: &str) -> String {
@@ -1182,6 +1202,48 @@ mod tests {
     }
 
     #[test]
+    fn create_password_is_saved_before_profile_is_published() {
+        let dir = tempfile::tempdir().unwrap();
+        let secrets = Arc::new(Secrets::default());
+        let registry = ProfileRegistry::open(
+            dir.path().into(),
+            dir.path().join("app.db"),
+            secrets.clone(),
+        )
+        .unwrap();
+        let before = registry.list().unwrap().len();
+        assert!(registry
+            .create_with_password("Protected", DEFAULT_PROFILE_AVATAR, Some("123"))
+            .is_err());
+        assert_eq!(registry.list().unwrap().len(), before);
+        let (profile, recovery) = registry
+            .create_with_password(
+                "Protected",
+                DEFAULT_PROFILE_AVATAR,
+                Some("my passphrase 🔒"),
+            )
+            .unwrap();
+        assert!(profile.lock_enabled);
+        assert!(registry.verify(profile.id, None).is_err());
+        assert!(registry
+            .verify(profile.id, Some("my passphrase 🔒"))
+            .unwrap());
+        assert!(registry.verify(profile.id, recovery.as_deref()).unwrap());
+        let id = profile.id;
+        drop(registry);
+        let registry =
+            ProfileRegistry::open(dir.path().into(), dir.path().join("app.db"), secrets).unwrap();
+        assert!(registry.profile(id).unwrap().lock_enabled);
+        assert!(registry.verify(id, Some("my passphrase 🔒")).unwrap());
+        let (plain, recovery) = registry
+            .create_with_password("Plain", DEFAULT_PROFILE_AVATAR, None)
+            .unwrap();
+        assert!(!plain.lock_enabled);
+        assert!(recovery.is_none());
+        assert!(!registry.verify(plain.id, None).unwrap());
+    }
+
+    #[test]
     fn password_policy_preserves_exact_text_and_existing_pin_verifiers() {
         let dir = tempfile::tempdir().unwrap();
         let registry = ProfileRegistry::open(
@@ -1191,12 +1253,15 @@ mod tests {
         )
         .unwrap();
         let id = registry.default_id().unwrap();
-        for invalid in ["", "1234567", &"a".repeat(MAX_PASSWORD_LENGTH + 1)] {
+        for invalid in ["", "123", &"a".repeat(MAX_PASSWORD_LENGTH + 1)] {
             assert!(matches!(
                 registry.set_password(id, None, Some(invalid)),
                 Err(ProfileError::Invalid(_))
             ));
         }
+        registry.set_password(id, None, Some("1234")).unwrap();
+        assert!(registry.verify(id, Some("1234")).unwrap());
+        registry.set_password(id, Some("1234"), None).unwrap();
         // Unicode scalar values determine length; leading/trailing spaces are significant.
         let password = " é🔒hello ";
         registry.set_password(id, None, Some(password)).unwrap();

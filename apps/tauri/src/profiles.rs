@@ -442,12 +442,20 @@ pub async fn create_profile(
     state: tauri::State<'_, NativeProfiles>,
     name: String,
     avatar_id: String,
-) -> Result<ProfileSummary, String> {
+    password: Option<String>,
+) -> Result<serde_json::Value, String> {
     let registry = state.registry.clone();
-    tauri::async_runtime::spawn_blocking(move || registry.create(&name, &avatar_id))
-        .await
-        .map_err(|e| e.to_string())?
-        .map_err(|e| e.to_string())
+    tauri::async_runtime::spawn_blocking(move || {
+        let password = password.map(Zeroizing::new);
+        let (profile, recovery_code) = registry
+            .create_with_password(&name, &avatar_id, password.as_deref().map(String::as_str))
+            .map_err(|e| e.to_string())?;
+        let mut result = serde_json::to_value(profile).map_err(|e| e.to_string())?;
+        result["recoveryCode"] = serde_json::json!(recovery_code);
+        Ok(result)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]

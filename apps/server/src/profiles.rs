@@ -373,11 +373,23 @@ async fn command(
         "create_profile" => {
             let name = text(&body, "name")?.to_string();
             let avatar = text(&body, "avatarId")?.to_string();
-            let profile = tokio::task::spawn_blocking(move || registry.create(&name, &avatar))
-                .await
-                .map_err(failure)?
-                .map_err(failure)?;
-            Ok(Json(json!(profile)))
+            let password = body
+                .get("password")
+                .and_then(Value::as_str)
+                .map(|value| zeroize::Zeroizing::new(value.to_string()));
+            let (profile, recovery_code) = tokio::task::spawn_blocking(move || {
+                registry.create_with_password(
+                    &name,
+                    &avatar,
+                    password.as_deref().map(String::as_str),
+                )
+            })
+            .await
+            .map_err(failure)?
+            .map_err(failure)?;
+            let mut result = json!(profile);
+            result["recoveryCode"] = json!(recovery_code);
+            Ok(Json(result))
         }
         "unlock_profile" => {
             root.visited

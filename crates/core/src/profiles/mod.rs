@@ -18,7 +18,9 @@ pub const PROFILE_LOCK_KEY: &str = "profile_lock";
 pub const DATABASE_KEY_SECRET: &str = "database_encryption_key";
 pub const PROFILE_SCOPE_HEADER: &str = "x-wf-profile-scope";
 pub const PROFILE_ID_HEADER: &str = "x-wf-profile-id";
+pub const DEFAULT_PROFILE_AVATAR: &str = "default";
 pub const PROFILE_AVATARS: &[&str] = &[
+    DEFAULT_PROFILE_AVATAR,
     "line-curls-animated",
     "line-wave-animated",
     "line-bob-animated",
