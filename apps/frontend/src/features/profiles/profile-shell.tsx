@@ -95,6 +95,7 @@ export function ProfileShell({ children }: { children: ReactNode }) {
         setState((old) => (old ? { ...old, session: null } : old));
         setMode("choose");
         setPhase("locked");
+        return true;
       } catch (e) {
         setError(String(e));
         setCloseFailed(true);
@@ -558,6 +559,12 @@ export function ProfileShell({ children }: { children: ReactNode }) {
       <ProfileContext.Provider
         value={{
           profile: current,
+          profileCount: state.profiles.length,
+          addProfile: () => {
+            void lock(false, "switch").then((closed) => {
+              if (closed) beginCreateProfile();
+            });
+          },
           manageProfile: () => {
             setPasswordManagement(current?.lockEnabled ?? false);
             setRemovePassword(false);

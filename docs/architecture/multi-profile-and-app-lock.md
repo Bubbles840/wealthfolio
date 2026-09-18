@@ -259,14 +259,15 @@ lock.
 | Connect restoration or outage        | Local portfolio stays usable; Connect reports its own status                |
 
 The profile menu remains available for a single unprotected profile, including
-profile settings (with optional password setup) and switching. The Lock action is
-shown only when password protection is enabled. Removing a password reopens the
-profile without a chooser. Switching is
-disabled while teardown is pending or failed. Status reads are serialized and
-older transition results discarded. Browser-tab scope replacement follows the
-same fresh-document rule: a different profile goes to the dashboard; a
-replacement scope for the same profile retains its route. A native process
-restart follows cold-launch policy rather than document-reload route continuity.
+profile settings (with optional password setup) and Add profile, which opens
+creation directly. With multiple profiles, Switch profile opens the picker. The
+Lock action appears only when password protection is enabled. Removing a
+password reopens the profile without a chooser. Switching is disabled while
+teardown is pending or failed. Status reads are serialized and older transition
+results discarded. Browser-tab scope replacement follows the same fresh-document
+rule: a different profile goes to the dashboard; a replacement scope for the
+same profile retains its route. A native process restart follows cold-launch
+policy rather than document-reload route continuity.
 
 The provider sequence is:
 

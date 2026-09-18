@@ -17,7 +17,8 @@ export function ProfileMenu({ collapsed = false }: { collapsed?: boolean }) {
   const { t } = useTranslation("common");
   const context = useProfile();
   if (!context?.profile) return null;
-  const { profile, manageProfile, lockProfile, switchProfile } = context;
+  const { profile, profileCount, addProfile, manageProfile, lockProfile, switchProfile } = context;
+  const singleProfile = profileCount === 1;
 
   return (
     <DropdownMenu>
@@ -58,9 +59,12 @@ export function ProfileMenu({ collapsed = false }: { collapsed?: boolean }) {
           <Icons.User className="size-4" />
           {t("profiles.settings")}
         </DropdownMenuItem>
-        <DropdownMenuItem className="h-11 gap-3 rounded-lg px-3" onSelect={switchProfile}>
-          <Icons.Users className="size-4" />
-          {t("profiles.switch")}
+        <DropdownMenuItem
+          className="h-11 gap-3 rounded-lg px-3"
+          onSelect={singleProfile ? addProfile : switchProfile}
+        >
+          {singleProfile ? <Icons.Plus className="size-4" /> : <Icons.Users className="size-4" />}
+          {t(singleProfile ? "profiles.add" : "profiles.switch")}
         </DropdownMenuItem>
         {profile.lockEnabled && (
           <>

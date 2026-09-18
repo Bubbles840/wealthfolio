@@ -83,6 +83,11 @@ it.each(["Lock Wealthfolio", "Switch profile"])(
         ...unlocked,
         profiles: [{ ...profile, lockEnabled: true }],
       });
+    else
+      mocks.command.mockResolvedValue({
+        ...unlocked,
+        profiles: [profile, { ...profile, id: "b", name: "Family" }],
+      });
     mount();
     expect(await screen.findByText("Private portfolio")).toBeInTheDocument();
     fireEvent.keyDown(screen.getByRole("button", { name: "Profile menu for Personal" }), {
@@ -113,7 +118,8 @@ it.each([true, false])(
       key: "Enter",
     });
     expect(await screen.findByRole("menuitem", { name: "Profile settings" })).toBeInTheDocument();
-    expect(screen.getByRole("menuitem", { name: "Switch profile" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "Add profile" })).toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: "Switch profile" })).not.toBeInTheDocument();
     expect(screen.queryByRole("menuitem", { name: "Lock Wealthfolio" })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("menuitem", { name: "Profile settings" }));
     fireEvent.click(await screen.findByRole("button", { name: "Enable password" }));
@@ -313,6 +319,10 @@ it("does not show the chooser while the initial profile state is unresolved", as
 });
 it("waits for teardown before allowing profile selection", async () => {
   const closing = deferred<void>();
+  mocks.command.mockResolvedValue({
+    ...unlocked,
+    profiles: [profile, { ...profile, id: "b", name: "Family" }],
+  });
   mount();
   await screen.findByText("Private portfolio");
   mocks.command.mockImplementation((command) =>
@@ -326,6 +336,10 @@ it("waits for teardown before allowing profile selection", async () => {
   await waitFor(() => expect(mocks.reload).toHaveBeenCalledWith({ dashboard: true }));
 });
 it("keeps failed teardown covered and lets the user retry", async () => {
+  mocks.command.mockResolvedValue({
+    ...unlocked,
+    profiles: [profile, { ...profile, id: "b", name: "Family" }],
+  });
   mount();
   await screen.findByText("Private portfolio");
   mocks.command.mockImplementation((command) =>
@@ -347,6 +361,10 @@ it("keeps failed teardown covered and lets the user retry", async () => {
   ).toBeInTheDocument();
 });
 it("opens an unprotected profile from the explicitly requested profile picker", async () => {
+  mocks.command.mockResolvedValue({
+    ...unlocked,
+    profiles: [profile, { ...profile, id: "b", name: "Family" }],
+  });
   mount();
   await screen.findByText("Private portfolio");
   mocks.command.mockResolvedValue({ ...unlocked, session: null });
@@ -360,6 +378,10 @@ it("opens an unprotected profile from the explicitly requested profile picker", 
 });
 it("ignores a status read from before a switch started", async () => {
   const old = deferred<typeof unlocked>();
+  mocks.command.mockResolvedValue({
+    ...unlocked,
+    profiles: [profile, { ...profile, id: "b", name: "Family" }],
+  });
   mount();
   await screen.findByText("Private portfolio");
   // Hold a real polling read, then invalidate it with an explicit switch.
@@ -949,4 +971,32 @@ it("refreshes native admission after database maintenance while content is cover
   await act(async () => mocks.databaseChanged());
   expect(mocks.admitted).toHaveBeenLastCalledWith(replacement);
   expect(screen.getByText("Private portfolio")).toBeInTheDocument();
+});
+
+it.each([true, false])("adds a second profile directly from the menu (web: %s)", async (isWeb) => {
+  mocks.isWeb = isWeb;
+  mount();
+  await screen.findByText("Private portfolio");
+  fireEvent.keyDown(screen.getByRole("button", { name: "Profile menu for Personal" }), {
+    key: "Enter",
+  });
+  fireEvent.click(await screen.findByRole("menuitem", { name: "Add profile" }));
+  expect(screen.queryByText("Private portfolio")).not.toBeInTheDocument();
+  expect(mocks.command).toHaveBeenCalledWith("lock_profile", { preserveAuth: false });
+  expect(await screen.findByRole("heading", { name: "Create a profile" })).toBeInTheDocument();
+  expect(
+    screen.queryByRole("heading", { name: "Who's using Wealthfolio?" }),
+  ).not.toBeInTheDocument();
+});
+it("does not open profile creation when closing the current profile fails", async () => {
+  mount();
+  await screen.findByText("Private portfolio");
+  fireEvent.keyDown(screen.getByRole("button", { name: "Profile menu for Personal" }), {
+    key: "Enter",
+  });
+  const add = await screen.findByRole("menuitem", { name: "Add profile" });
+  mocks.command.mockRejectedValue(new Error("Unable to close profile"));
+  fireEvent.click(add);
+  expect(await screen.findByText("Couldn’t finish locking")).toBeInTheDocument();
+  expect(screen.queryByRole("heading", { name: "Create a profile" })).not.toBeInTheDocument();
 });

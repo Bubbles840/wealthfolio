@@ -3,6 +3,8 @@ import type { ProfileSummary } from "./api";
 
 interface ProfileContextValue {
   profile: ProfileSummary | undefined;
+  profileCount: number;
+  addProfile: () => void;
   manageProfile: () => void;
   lockProfile: () => void;
   switchProfile: () => void;
