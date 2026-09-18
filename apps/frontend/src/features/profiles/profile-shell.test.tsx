@@ -78,6 +78,11 @@ beforeEach(() => {
 it.each(["Lock Wealthfolio", "Switch profile"])(
   "unmounts financial providers immediately on %s from the profile menu",
   async (action) => {
+    if (action === "Lock Wealthfolio")
+      mocks.command.mockResolvedValue({
+        ...unlocked,
+        profiles: [{ ...profile, lockEnabled: true }],
+      });
     mount();
     expect(await screen.findByText("Private portfolio")).toBeInTheDocument();
     fireEvent.keyDown(screen.getByRole("button", { name: "Profile menu for Personal" }), {
@@ -93,6 +98,27 @@ it.each(["Lock Wealthfolio", "Switch profile"])(
         name: "Who's using Wealthfolio?",
       }),
     ).toBeInTheDocument();
+  },
+);
+it.each([true, false])(
+  "opens an unprotected profile directly and keeps settings available (web: %s)",
+  async (isWeb) => {
+    mocks.isWeb = isWeb;
+    mount();
+    expect(await screen.findByText("Private portfolio")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "Who's using Wealthfolio?" }),
+    ).not.toBeInTheDocument();
+    fireEvent.keyDown(screen.getByRole("button", { name: "Profile menu for Personal" }), {
+      key: "Enter",
+    });
+    expect(await screen.findByRole("menuitem", { name: "Profile settings" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "Switch profile" })).toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: "Lock Wealthfolio" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("menuitem", { name: "Profile settings" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Enable password" }));
+    expect(screen.getByLabelText("New password")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Current password or recovery code")).not.toBeInTheDocument();
   },
 );
 it("does not expose a protected profile while startup authorization is pending", async () => {
@@ -241,17 +267,17 @@ it("keeps failed teardown covered and lets the user retry", async () => {
     await screen.findByRole("heading", { name: "Who's using Wealthfolio?" }),
   ).toBeInTheDocument();
 });
-it("opens the selected unprotected profile from the shared lock screen and preserves its route", async () => {
+it("opens an unprotected profile from the explicitly requested profile picker", async () => {
   mount();
   await screen.findByText("Private portfolio");
   mocks.command.mockResolvedValue({ ...unlocked, session: null });
-  await menuAction("Lock Wealthfolio");
+  await menuAction("Switch profile");
   expect(
     await screen.findByRole("heading", { name: "Who's using Wealthfolio?" }),
   ).toBeInTheDocument();
   expect(mocks.reload).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole("button", { name: "Personal" }));
-  await waitFor(() => expect(mocks.reload).toHaveBeenCalledWith({ dashboard: false }));
+  await waitFor(() => expect(mocks.reload).toHaveBeenCalledWith({ dashboard: true }));
 });
 it("ignores a status read from before a switch started", async () => {
   const old = deferred<typeof unlocked>();
@@ -429,6 +455,7 @@ it("requires proof and removes an existing password only when disabling is saved
       true,
     ),
   );
+  await waitFor(() => expect(mocks.reload).toHaveBeenCalledWith({ dashboard: false }));
 });
 
 it.each(["setup", "change", "recovery"])(
@@ -496,7 +523,7 @@ it.each(["setup", "change", "recovery"])(
   },
 );
 
-it("removes a password with current proof without requiring confirmation", async () => {
+it("removes a password with current proof and reopens without a profile picker", async () => {
   mocks.command.mockResolvedValue({ ...unlocked, profiles: [{ ...profile, lockEnabled: true }] });
   mount();
   await menuAction("Profile settings");
@@ -523,6 +550,11 @@ it("removes a password with current proof without requiring confirmation", async
       true,
     ),
   );
+  await waitFor(() => expect(mocks.reload).toHaveBeenCalledWith({ dashboard: false }));
+  expect(mocks.command).toHaveBeenCalledWith("unlock_profile", { profileId: "a", proof: null });
+  expect(
+    screen.queryByRole("heading", { name: "Who's using Wealthfolio?" }),
+  ).not.toBeInTheDocument();
 });
 
 it("deletes the last profile and returns to an empty profile picker", async () => {

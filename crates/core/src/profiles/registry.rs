@@ -1058,6 +1058,8 @@ mod tests {
             ProfileRegistry::open(dir.path().into(), path.clone(), secrets.clone()).unwrap();
         let default = registry.profile(registry.default_id().unwrap()).unwrap();
         assert_eq!(registry.paths(&default).database, path);
+        assert!(!default.lock_enabled);
+        assert!(!registry.verify(default.id, None).unwrap());
         assert_eq!(
             registry
                 .secret_store(&default)

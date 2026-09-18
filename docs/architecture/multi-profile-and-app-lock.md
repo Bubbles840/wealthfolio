@@ -201,7 +201,9 @@ access while preserving picker-granted external files.
 
 Protected sessions expire after five minutes without user activity. Switching apps,
 backgrounding, or a delayed timer tick does not immediately lock the profile.
-Desktop OS session-lock and sleep notifications still trigger protection. Polling
+Desktop OS session-lock and sleep notifications revoke only password-protected
+sessions, using the protection state established by backend credential verification.
+Unprotected sessions remain open through idle, sleep, and OS lock. Polling
 and background sync do not extend the idle deadline. React renders the lock screen;
 there is no separate native overlay or cover acknowledgement protocol. Android sets
 `FLAG_SECURE` while backgrounded and clears it when the activity resumes.
@@ -245,7 +247,10 @@ lock.
 | Database or initial settings failure | Explicit error with retry and permitted recovery/switch actions             |
 | Connect restoration or outage        | Local portfolio stays usable; Connect reports its own status                |
 
-A manually locked unprotected profile requires a click to reopen. Switching is
+The profile menu remains available for a single unprotected profile, including
+profile settings (with optional password setup) and switching. The Lock action is
+shown only when password protection is enabled. Removing a password reopens the
+profile without a chooser. Switching is
 disabled while teardown is pending or failed. Status reads are serialized and
 older transition results discarded. Browser-tab scope replacement follows the
 same fresh-document rule: a different profile goes to the dashboard; a

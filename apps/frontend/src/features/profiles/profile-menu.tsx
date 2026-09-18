@@ -62,11 +62,15 @@ export function ProfileMenu({ collapsed = false }: { collapsed?: boolean }) {
           <Icons.Users className="size-4" />
           {t("profiles.switch")}
         </DropdownMenuItem>
-        <DropdownMenuSeparator />
-        <DropdownMenuItem className="h-11 gap-3 rounded-lg px-3" onSelect={lockProfile}>
-          <Icons.Lock className="size-4" />
-          {t("profiles.lock")}
-        </DropdownMenuItem>
+        {profile.lockEnabled && (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem className="h-11 gap-3 rounded-lg px-3" onSelect={lockProfile}>
+              <Icons.Lock className="size-4" />
+              {t("profiles.lock")}
+            </DropdownMenuItem>
+          </>
+        )}
       </DropdownMenuContent>
     </DropdownMenu>
   );

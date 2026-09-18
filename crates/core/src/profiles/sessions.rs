@@ -142,6 +142,23 @@ impl ProfileSessions {
         Ok(())
     }
 
+    /// Preserve admitted unprotected sessions during automatic lifecycle locking.
+    /// Missing grants still cancel pending admission. Protection comes from
+    /// credential verification, not the registry hint.
+    pub fn revoke_for_auto_lock(&self, owner: &str) -> ProfileResult<bool> {
+        let mut revisions = self.1.lock().map_err(|_| ProfileError::Locked)?;
+        let mut grants = self
+            .0
+            .lock()
+            .map_err(|_| ProfileError::Unavailable("Session state is unavailable.".into()))?;
+        if grants.get(owner).is_some_and(|grant| !grant.protected) {
+            return Ok(false);
+        }
+        *revisions.entry(owner.into()).or_default() += 1;
+        grants.remove(owner);
+        Ok(true)
+    }
+
     pub fn revoke_profile(&self, profile_id: Uuid) -> ProfileResult<()> {
         let mut revisions = self.1.lock().map_err(|_| ProfileError::Locked)?;
         for revision in revisions.values_mut() {
@@ -158,6 +175,47 @@ impl ProfileSessions {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unprotected_sessions_survive_idle_and_lifecycle_but_allow_explicit_switching() {
+        let sessions = ProfileSessions::default();
+        let session = sessions
+            .issue("native", Uuid::new_v4(), false, None)
+            .unwrap();
+        sessions
+            .0
+            .lock()
+            .unwrap()
+            .get_mut("native")
+            .unwrap()
+            .activity = Instant::now() - PROFILE_IDLE_TIMEOUT;
+        assert!(!sessions.revoke_for_auto_lock("native").unwrap());
+        assert!(sessions.admit("native", session.scope_id).is_ok());
+        sessions.revoke("native").unwrap();
+        assert!(matches!(
+            sessions.admit("native", session.scope_id),
+            Err(ProfileError::Locked)
+        ));
+    }
+
+    #[test]
+    fn lifecycle_lock_revokes_protected_sessions_and_pending_admission() {
+        let sessions = ProfileSessions::default();
+        let session = sessions
+            .issue("native", Uuid::new_v4(), true, None)
+            .unwrap();
+        let revision = sessions.unlock_revision("native").unwrap();
+        assert!(sessions.revoke_for_auto_lock("native").unwrap());
+        assert!(sessions.admit("native", session.scope_id).is_err());
+        assert!(sessions
+            .issue_if_current("native", revision, session.profile_id, true)
+            .is_err());
+        let revision = sessions.unlock_revision("native").unwrap();
+        assert!(sessions.revoke_for_auto_lock("native").unwrap());
+        assert!(sessions
+            .issue_if_current("native", revision, session.profile_id, true)
+            .is_err());
+    }
 
     #[test]
     fn switching_and_browser_ownership_reject_stale_scopes() {

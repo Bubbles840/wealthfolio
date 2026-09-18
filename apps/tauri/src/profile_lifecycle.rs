@@ -9,7 +9,14 @@ pub fn request_lock(reason: &str) {
         return;
     };
     let root = handle.state::<crate::profiles::NativeProfiles>();
-    let _ = root.registry.sessions.revoke(crate::profiles::NATIVE_OWNER);
+    if matches!(
+        root.registry
+            .sessions
+            .revoke_for_auto_lock(crate::profiles::NATIVE_OWNER),
+        Ok(false)
+    ) {
+        return;
+    }
     if let Some(runtime) = root.active().ok().flatten() {
         runtime.suspend();
     }

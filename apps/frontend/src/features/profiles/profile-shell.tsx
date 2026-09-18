@@ -491,9 +491,7 @@ export function ProfileShell({ children }: { children: ReactNode }) {
           setCovered(true);
           if (!code) {
             await profileCommand("lock_profile", { preserveAuth: false });
-            setState((old) => (old ? { ...old, session: null } : old));
-            setPhase("locked");
-            setMode("choose");
+            if (selected) await unlock(selected.id, "", { ...selected, lockEnabled: false });
           }
         } else reloadApplication();
       }
