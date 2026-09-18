@@ -21,7 +21,7 @@ revocable session, never a caller-selected database path or secret namespace.
 | [Registry](../../crates/core/src/profiles/registry.rs)                       | Persistent metadata, legacy adoption, passwords, recovery, Connect binding |
 | [Sessions](../../crates/core/src/profiles/sessions.rs)                       | Grants, revocation, idle expiry                                            |
 | [Native profiles](../../apps/tauri/src/profiles.rs)                          | IPC admission and active-profile lifecycle                                 |
-| [Native lifecycle](../../apps/tauri/src/profile_lifecycle.rs)                | OS lifecycle notifications and privacy cover                               |
+| [Native lifecycle](../../apps/tauri/src/profile_lifecycle.rs)                | OS session-lock and sleep notifications                               |
 | [Server profiles](../../apps/server/src/profiles.rs)                         | Per-profile runtimes, browser grants, HTTP and MCP routing                 |
 | [Profile shell](../../apps/frontend/src/features/profiles/profile-shell.tsx) | Chooser, password management, recovery, startup transitions                |
 | [Auth bridge](../../apps/frontend/src/features/profiles/auth-bridge.ts)      | OAuth ownership and scoped PKCE storage                                    |
@@ -97,11 +97,11 @@ teardown does not guarantee memory erasure.
 | Web database key               | Operator master-key derivation, scoped for new profiles |
 | Connect and device credentials | Profile-scoped secret store                             |
 
-Passwords accept 8–128 Unicode characters, preserving spaces and exact text.
-Existing six-digit PIN verifiers remain usable for unlock and credential
-changes. New verifiers use Argon2id with 19 MiB memory, two iterations, one
-lane, a random salt, and encoded parameters. Hosts run verification outside the
-async executor.
+Passwords accept 4–128 Unicode characters, including four-digit PINs, preserving
+spaces and exact text. Existing six-digit PIN verifiers remain usable for unlock
+and credential changes. New verifiers use Argon2id with 19 MiB memory, two
+iterations, one lane, a random salt, and encoded parameters. Hosts run
+verification outside the async executor.
 
 After five failed attempts, verification imposes a 30-second cooldown;
 subsequent cooldowns double up to 15 minutes. Successful verification clears
@@ -171,10 +171,26 @@ helpers receive an admitted root path rather than consulting a current profile.
 
 ### Native
 
+The native profile shell subscribes before its initial state read and refreshes
+on `app:ready`, session changes, and database changes. Native readiness does not
+poll. Web retains its two-second profile-session polling because it has no native
+session-change notifications; it does not use the native database gate.
+
+The database gate reads status after subscribing to `database-state-changed`.
+The backend maintenance guard notifies when retry, restore, recovery, or encryption
+maintenance begins and after its flag is cleared, including failures. Its listener
+remains mounted while financial screens are hidden. The profile shell also listens
+so a database rebuild can renew a stale session even if the database gate was
+unmounted. Existing session admission and reload behavior isolate the rebuilt
+runtime; notifications do not grant access or duplicate backend state.
+
 One profile is active at a time. Lock or switch immediately covers financial UI
 and revokes admission, then stops interactive work, workers, device sync, and
-embedded MCP through the existing database lifecycle. The writer and database
-ownership are released before another profile opens. Ownership failure leaves
+embedded MCP through the existing database lifecycle. Portfolio refresh tasks are
+owned by that profile, including their awaited calculation phase. Teardown cancels
+and joins them before closing the writer; late refresh requests are rejected.
+The writer still drains submitted transactions, and database ownership checks
+still account for blocking work. The writer and database ownership are released before another profile opens. Ownership failure leaves
 the app inaccessible rather than activating a second context.
 
 Unlock rebuilds the service context. Full document navigation clears financial
@@ -183,15 +199,13 @@ maintenance remains app-owned and pinned to its original runtime. Internal file
 transfers use admitted commands; native capabilities restrict direct app-data
 access while preserving picker-granted external files.
 
-Protected sessions expire after five minutes without user activity. Native OS
-lock/suspend and mobile deactivation also trigger protection. Polling and
-background sync do not extend the idle deadline. The Apple privacy cover is an
-opaque native surface above a visible WebView, with epoch-checked removal after
-the renderer presents a safe surface and a recovery reload action. Android
-sets `FLAG_SECURE` while backgrounded and clears it only after the current
-cover epoch has been acknowledged and the activity has resumed. Native
-lifecycle behavior needs platform testing; JavaScript visibility alone is not
-the privacy boundary.
+Protected sessions expire after five minutes without user activity. Switching apps,
+backgrounding, or a delayed timer tick does not immediately lock the profile.
+Desktop OS session-lock and sleep notifications still trigger protection. Polling
+and background sync do not extend the idle deadline. React renders the lock screen;
+there is no separate native overlay or cover acknowledgement protocol. Android sets
+`FLAG_SECURE` while backgrounded and clears it when the activity resumes.
+Native lifecycle behavior needs platform testing.
 
 ### Self-hosted web
 
@@ -298,39 +312,40 @@ pauses cloud work without blocking local access.
 
 Candidate credentials are verified before binding. Serialized identity
 reservation prevents the same issuer/user ID from attaching to multiple local
-profiles. Binding uses user ID rather than email and survives sign-out. A different
-account or team requires explicit confirmation. The cloud sync scope
+profiles. Binding uses user ID rather than email and survives sign-out. A
+different account or team requires explicit confirmation. The cloud sync scope
 is `(teamId, userId)`; profiles are local and never sent as cloud identities.
 
 Automatic cloud admission re-fetches the verified user/team binding, even when
 its access token has not changed. This applies to foreground requests and queued
 broker sync. Missing legacy ownership or changed membership pauses cloud work
-and requires explicit reconnection; automatic restoration never adopts a binding.
-A user/team preflight is not atomic with the subsequent cloud request. Preventing
-membership changes between those requests requires a cloud API contract that
-checks the expected user/team on the operation itself; the current API does not
-provide that guarantee.
+and requires explicit reconnection; automatic restoration never adopts a
+binding. A user/team preflight is not atomic with the subsequent cloud request.
+Preventing membership changes between those requests requires a cloud API
+contract that checks the expected user/team on the operation itself; the current
+API does not provide that guarantee.
 
 Temporary Connect transition contention returns HTTP 503, not the HTTP 423 used
 for revoked profile authority. The frontend retains its valid local session and
 can retry after the transition completes.
 
 The confirmation preview does not persist candidate credentials or change the
-binding. A rotated candidate refresh token is kept only in process memory, with a
-ten-minute validity window, so confirmation can retry after a human delay.
-Confirmation revalidates the candidate against the cloud. Duplicate local account
-reservations remain forbidden, including confirmed requests. Ordinary sign-out
-keeps the last binding so reconnecting the same account retains enrollment and
-switching to another account cannot reuse its keys or cursors. Unbound migrated
-profiles with existing cloud credentials or enrollment also require confirmation
-and cleanup, because ownership of that existing state has not been verified.
+binding. A rotated candidate refresh token is kept only in process memory, with
+a ten-minute validity window, so confirmation can retry after a human delay.
+Confirmation revalidates the candidate against the cloud. Duplicate local
+account reservations remain forbidden, including confirmed requests. Ordinary
+sign-out keeps the last binding so reconnecting the same account retains
+enrollment and switching to another account cannot reuse its keys or cursors.
+Unbound migrated profiles with existing cloud credentials or enrollment also
+require confirmation and cleanup, because ownership of that existing state has
+not been verified.
 
 A confirmed change excludes in-flight profile commands, reserves broker sync,
 and serializes login/logout/token refresh. Pairing key writes must match the
 current device ID and enrollment nonce; stale UI callbacks cannot recreate an
-identity cleared by rebinding. Background engine startup is paused
-and the previous worker is stopped and joined. Cleanup clears local enrollment
-and sync keys, pairing consent/flows, outbox/cursors and broker mappings. Accounts,
+identity cleared by rebinding. Background engine startup is paused and the
+previous worker is stopped and joined. Cleanup clears local enrollment and sync
+keys, pairing consent/flows, outbox/cursors and broker mappings. Accounts,
 holdings, activities, database encryption keys, the local password and unrelated
 secrets remain. Broker mappings and sync control state are cleared in one SQLite
 writer transaction. No cloud reset or deletion is invoked. Device sync must be
@@ -339,8 +354,8 @@ account after that setup.
 
 Cleanup failures leave cloud access gated off and do not store candidate
 credentials. The old binding remains until cleanup succeeds. A failed credential
-write after successful rebinding leaves reconnect required; retrying the verified
-new account can safely complete login.
+write after successful rebinding leaves reconnect required; retrying the
+verified new account can safely complete login.
 
 Supabase keeps its existing login and code-exchange behavior with profile/flow
 scoped backend PKCE storage. One pending login is allowed per native
@@ -366,11 +381,11 @@ profile, and browser locking does not revoke independent PAT authorization.
 ## Scope and verification boundaries
 
 Biometrics, a new web-user ownership system, and cloud household enrollment
-changes are outside this
-feature. This app targets the separately implemented cloud user-scoped sync
-adaptation: enrollment, pairing, cursors and snapshots belong to `(teamId, userId)`.
-Deploy that cloud adaptation before relying on separation between members of the
-same team. No cloud code is changed by this app feature.
+changes are outside this feature. This app targets the separately implemented
+cloud user-scoped sync adaptation: enrollment, pairing, cursors and snapshots
+belong to `(teamId, userId)`. Deploy that cloud adaptation before relying on
+separation between members of the same team. No cloud code is changed by this
+app feature.
 
 Regression coverage belongs with the core registry/session tests, native
 lifecycle tests, server profile integration tests, frontend profile/startup
@@ -380,7 +395,7 @@ Key invariants are independent databases and credentials, persisted cooldowns,
 recovery rotation, stale-scope rejection, pinned delayed writes, callback
 ownership, per-browser grants, and destination appearance/route handling.
 
-Release verification must also exercise real native lock/suspend and cover
+Release verification must also exercise real native lock/suspend and React lock-screen
 paint, OAuth background/return, external-file permissions, encrypted and
 missing-key recovery, legacy encrypted backups, and lock/switch during
 encryption or restore. Restoring into B must leave A's database, keys, and
@@ -388,3 +403,18 @@ Connect credentials unchanged. Browser and unit tests alone do not establish
 these guarantees. The previously reported intermittent native white window still
 needs a runtime reproduction before its exact cause or resolution can be
 asserted.
+
+### Avatar artwork and startup
+
+Avatar IDs, crop coordinates, eye layers, and atlas paths live in
+`apps/frontend/src/features/profiles/avatar-catalog.ts`. `ProfileAvatar` renders
+that catalog; `animated={false}` preserves the artwork while disabling movement.
+Before React loads, the HTML splash displays the golden logo on a cold launch.
+After profile selection, the existing short-lived presentation hint instead shows
+the same rounded avatar frame and golden logo used by React’s loading screen, using shared CSS.
+The HTML placeholder disappears when React fills the root. Matching size and
+position avoid an avatar swap or animation restart. No React bundle or avatar
+atlas is needed for the HTML placeholder; it uses the existing logo asset.
+
+Avatars use the original atlases directly. There are no generated avatar snapshots,
+startup markup files, or avatar-generation commands.
