@@ -121,6 +121,85 @@ it.each([true, false])(
     expect(screen.queryByLabelText("Current password or recovery code")).not.toBeInTheDocument();
   },
 );
+it.each([
+  "PROFILE_UNAVAILABLE: The profile registry is missing. Restore profiles.json from a backup.",
+  "PROFILE_UNAVAILABLE: The profile registry is invalid.",
+])("keeps registry startup failures recoverable: %s", async (startupError) => {
+  mocks.isWeb = false;
+  const failed = { profiles: [], session: null, starting: false, startupError };
+  mocks.command.mockResolvedValue(failed);
+  mount();
+  expect(await screen.findByText("We couldn’t open Wealthfolio")).toBeInTheDocument();
+  expect(screen.queryByText("Private portfolio")).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Create profile" })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByText("Technical details"));
+  expect(screen.getByText(startupError)).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "Open data folder" }));
+  await waitFor(() => expect(mocks.command).toHaveBeenCalledWith("open_profile_data_folder"));
+  expect(mocks.reload).not.toHaveBeenCalled();
+  await waitFor(() => expect(screen.getByRole("button", { name: "Try again" })).toBeEnabled());
+  mocks.command.mockImplementation(async (command: string) => {
+    if (command === "retry_profile_startup") throw new Error(startupError);
+    return failed;
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+  expect(
+    await screen.findByText("We couldn’t complete that step. Please try again."),
+  ).toBeInTheDocument();
+  expect(mocks.reload).not.toHaveBeenCalled();
+  mocks.command.mockImplementation(async (command: string) =>
+    command === "get_profile_state" ? unlocked : null,
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+  await waitFor(() => expect(mocks.reload).toHaveBeenCalledOnce());
+});
+it.each([false, true])(
+  "requires confirmation before starting fresh and handles failure: %s",
+  async (fails) => {
+    mocks.isWeb = false;
+    const failed = {
+      profiles: [],
+      session: null,
+      starting: false,
+      startupError: "PROFILE_UNAVAILABLE: The profile registry is missing.",
+    };
+    const empty = { ...failed, startupError: null };
+    mocks.command.mockResolvedValue(failed);
+    mount();
+    fireEvent.click(await screen.findByRole("button", { name: "Set up a new profile" }));
+    expect(
+      screen.getByRole("heading", { name: "Start with an empty profile?" }),
+    ).toBeInTheDocument();
+    expect(mocks.command).not.toHaveBeenCalledWith("start_new_profile_setup");
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(mocks.command).not.toHaveBeenCalledWith("start_new_profile_setup");
+    fireEvent.click(screen.getByRole("button", { name: "Set up a new profile" }));
+    mocks.command.mockImplementation((command: string) => {
+      if (command === "start_new_profile_setup") {
+        return fails
+          ? Promise.reject(new Error("Cannot preserve registry files"))
+          : Promise.resolve(empty);
+      }
+      return Promise.resolve(fails ? failed : empty);
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Continue to setup" }));
+    await waitFor(() => expect(mocks.command).toHaveBeenCalledWith("start_new_profile_setup"));
+    if (fails) {
+      expect(await screen.findByRole("alert")).toHaveTextContent(
+        "We couldn’t complete that step. Please try again.",
+      );
+      expect(screen.getByRole("button", { name: "Continue to setup" })).toBeEnabled();
+    } else {
+      expect(await screen.findByLabelText("Name")).toHaveValue("");
+      expect(screen.getByRole("button", { name: "Enable password" })).toBeInTheDocument();
+      expect(
+        screen.queryByRole("heading", { name: "We couldn’t open Wealthfolio" }),
+      ).not.toBeInTheDocument();
+    }
+    expect(screen.queryByText("Private portfolio")).not.toBeInTheDocument();
+  },
+);
+
 it("does not expose a protected profile while startup authorization is pending", async () => {
   mocks.command.mockResolvedValue({
     profiles: [{ ...profile, lockEnabled: true }],

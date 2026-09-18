@@ -171,6 +171,17 @@ helpers receive an admitted root path rather than consulting a current profile.
 
 ### Native
 
+Registry initialization runs after Tauri setup so missing or corrupt registry files
+show a startup recovery screen instead of aborting the process. Before a registry
+is available, the shell can read startup status, retry initialization, and open the
+configured data folder. Financial commands remain unavailable. Retry preserves
+existing data and uses the registry's normal backup restoration. An explicit,
+confirmed fresh start archives unreadable registry files under
+`profile-registry-backups/<id>/` and initializes an empty registry before entering
+normal profile setup. It refuses usable registries or ownership conflicts, never
+adopts orphaned databases or credentials, and leaves existing data files in place.
+Neither recovery path reconstructs profiles from directories.
+
 The native profile shell subscribes before its initial state read and refreshes
 on `app:ready`, session changes, and database changes. Native readiness does not
 poll. Web retains its two-second profile-session polling because it has no native

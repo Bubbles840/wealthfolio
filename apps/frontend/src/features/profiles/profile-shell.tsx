@@ -16,6 +16,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode, type FormEven
 import { profileCommand, type ProfileState, type ProfileSummary } from "./api";
 import { DEFAULT_PROFILE_AVATAR, ProfileAvatar } from "./profile-avatar";
 import { ProfileAvatarPicker } from "./profile-avatar-picker";
+import { ProfileStartupRecovery } from "./profile-startup-recovery";
 import "./profile-shell.css";
 import { ProfileContext } from "./profile-context";
 import {
@@ -138,7 +139,10 @@ export function ProfileShell({ children }: { children: ReactNode }) {
           if (!next.pendingDeletions?.some((profile) => profile.id === previous.id))
             clearProfilePreferences(previous.id);
         }
-        if (next.session) {
+        if (next.startupError) {
+          setState(next);
+          setPhase("loading");
+        } else if (next.session) {
           const profile = next.profiles.find((p) => p.id === next.session?.profileId);
           if (profile) rememberOpeningProfile(profile);
           if (!installProfileSession(next.session)) return;
@@ -497,6 +501,30 @@ export function ProfileShell({ children }: { children: ReactNode }) {
       }
     });
   }
+  function beginCreateProfile() {
+    setError("");
+    setPassword("");
+    setConfirmPassword("");
+    setConfirmationInvalid(false);
+    setProof("");
+    setName("");
+    setPasswordManagement(false);
+    setRemovePassword(false);
+    setSelected(undefined);
+    setAvatar(DEFAULT_PROFILE_AVATAR);
+    setMode("create");
+  }
+  if (!isWeb && state?.startupError)
+    return (
+      <ProfileStartupRecovery
+        error={state.startupError}
+        onStartNew={(next) => {
+          setState(next);
+          setPhase("locked");
+          beginCreateProfile();
+        }}
+      />
+    );
   if (!recovery && (phase === "loading" || phase === "closing" || phase === "opening")) {
     return (
       <StartupScreen
@@ -960,19 +988,7 @@ export function ProfileShell({ children }: { children: ReactNode }) {
               size={hasNoProfiles ? "lg" : "sm"}
               className={hasNoProfiles ? "px-8" : "profile-lock-add text-muted-foreground text-xs"}
               disabled={busy}
-              onClick={() => {
-                setError("");
-                setPassword("");
-                setConfirmPassword("");
-                setConfirmationInvalid(false);
-                setProof("");
-                setName("");
-                setPasswordManagement(false);
-                setRemovePassword(false);
-                setSelected(undefined);
-                setAvatar(DEFAULT_PROFILE_AVATAR);
-                setMode("create");
-              }}
+              onClick={beginCreateProfile}
             >
               {state?.profiles.length === 0 ? t("profiles.create") : t("profiles.add")}
             </Button>

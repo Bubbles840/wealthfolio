@@ -8,7 +8,9 @@ pub fn request_lock(reason: &str) {
     let Some(handle) = APP.get() else {
         return;
     };
-    let root = handle.state::<crate::profiles::NativeProfiles>();
+    let Some(root) = handle.try_state::<crate::profiles::NativeProfiles>() else {
+        return;
+    };
     if matches!(
         root.registry
             .sessions

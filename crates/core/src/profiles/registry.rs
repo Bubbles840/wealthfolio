@@ -19,6 +19,7 @@ const MAX_PASSWORD_LENGTH: usize = 128;
 
 const REGISTRY_FILE: &str = "profiles.json";
 const REGISTRY_BACKUP: &str = "profiles.json.bak";
+const REGISTRY_ARCHIVES: &str = "profile-registry-backups";
 const DELETIONS_DIR: &str = "profile-deletions";
 const REGISTRY_VERSION: u32 = 1;
 const RECOVERY_DOMAIN: &[u8] = b"wealthfolio/profile-recovery/v1/";
@@ -174,6 +175,25 @@ impl ProfileRegistry {
         legacy_database: PathBuf,
         secrets: Arc<dyn SecretStore>,
     ) -> ProfileResult<Self> {
+        Self::open_with_recovery(root, legacy_database, secrets, false)
+    }
+
+    /// Explicit recovery only: preserve orphaned data and credentials, then allow
+    /// a new, independently scoped profile to be created through normal setup.
+    pub fn start_new(
+        root: PathBuf,
+        legacy_database: PathBuf,
+        secrets: Arc<dyn SecretStore>,
+    ) -> ProfileResult<Self> {
+        Self::open_with_recovery(root, legacy_database, secrets, true)
+    }
+
+    fn open_with_recovery(
+        root: PathBuf,
+        legacy_database: PathBuf,
+        secrets: Arc<dyn SecretStore>,
+        start_new: bool,
+    ) -> ProfileResult<Self> {
         fs::create_dir_all(&root).map_err(storage_error)?;
         let owner = OpenOptions::new()
             .read(true)
@@ -187,7 +207,35 @@ impl ProfileRegistry {
         })?;
         let path = root.join(REGISTRY_FILE);
         let backup = root.join(REGISTRY_BACKUP);
-        let data = if path.exists() || backup.exists() {
+        let data = if start_new {
+            if read_registry(&path).is_ok() || read_registry(&backup).is_ok() {
+                return Err(ProfileError::Invalid(
+                    "A usable profile registry exists. Retry opening your profiles.".into(),
+                ));
+            }
+            // Archive before replacing metadata. Any read/write failure aborts
+            // recovery, leaving the original files in place.
+            let archive = root
+                .join(REGISTRY_ARCHIVES)
+                .join(Uuid::new_v4().to_string());
+            for source in [&path, &backup] {
+                if source.try_exists().map_err(storage_error)? {
+                    let bytes = fs::read(source).map_err(storage_error)?;
+                    fs::create_dir_all(&archive).map_err(storage_error)?;
+                    atomic_write(&archive.join(source.file_name().unwrap()), &bytes)?;
+                }
+            }
+            let data = RegistryData {
+                version: REGISTRY_VERSION,
+                default_profile_id: None,
+                profiles: vec![],
+            };
+            atomic_write(
+                &path,
+                &serde_json::to_vec_pretty(&data).map_err(storage_error)?,
+            )?;
+            data
+        } else if path.exists() || backup.exists() {
             match read_registry(&path) {
                 Ok(data) => data,
                 Err(_) => {
@@ -1426,6 +1474,149 @@ mod tests {
         )
         .is_err());
         assert!(!dir.path().join(REGISTRY_FILE).exists());
+    }
+
+    #[test]
+    fn missing_or_corrupt_registry_preserves_data_and_can_retry_after_restoration() {
+        for corrupt in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let database = dir.path().join("app.db");
+            fs::write(&database, b"existing database").unwrap();
+            let secrets = Arc::new(Secrets::default());
+            let registry =
+                ProfileRegistry::open(dir.path().into(), database.clone(), secrets.clone())
+                    .unwrap();
+            let id = registry.default_id().unwrap();
+            let second = registry.create("Second", DEFAULT_PROFILE_AVATAR).unwrap();
+            let paths = registry.paths(&registry.profile(second.id).unwrap());
+            fs::create_dir_all(&paths.root).unwrap();
+            fs::write(&paths.database, b"second database").unwrap();
+            let saved = fs::read(dir.path().join(REGISTRY_FILE)).unwrap();
+            drop(registry);
+            for name in [REGISTRY_FILE, REGISTRY_BACKUP] {
+                if corrupt {
+                    fs::write(dir.path().join(name), b"broken registry").unwrap();
+                } else {
+                    fs::remove_file(dir.path().join(name)).unwrap();
+                }
+            }
+            assert!(
+                ProfileRegistry::open(dir.path().into(), database.clone(), secrets.clone(),)
+                    .is_err()
+            );
+            assert_eq!(fs::read(&database).unwrap(), b"existing database");
+            assert_eq!(fs::read(&paths.database).unwrap(), b"second database");
+            for name in [REGISTRY_FILE, REGISTRY_BACKUP] {
+                if corrupt {
+                    assert_eq!(fs::read(dir.path().join(name)).unwrap(), b"broken registry");
+                } else {
+                    assert!(!dir.path().join(name).exists());
+                }
+            }
+            // Restoring a backup must permit a new attempt in the same process.
+            fs::write(dir.path().join(REGISTRY_BACKUP), &saved).unwrap();
+            let restored = ProfileRegistry::open(dir.path().into(), database, secrets).unwrap();
+            assert_eq!(restored.default_id().unwrap(), id);
+            assert_eq!(restored.list().unwrap().len(), 2);
+            assert_eq!(fs::read(dir.path().join(REGISTRY_FILE)).unwrap(), saved);
+        }
+    }
+
+    #[test]
+    fn explicit_new_start_preserves_orphans_credentials_and_corrupt_registries() {
+        for corrupt in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let legacy = dir.path().join("app.db");
+            fs::write(&legacy, b"legacy portfolio").unwrap();
+            let secrets = Arc::new(Secrets::default());
+            let old =
+                ProfileRegistry::open(dir.path().into(), legacy.clone(), secrets.clone()).unwrap();
+            let orphan = old.create("Old", DEFAULT_PROFILE_AVATAR).unwrap();
+            let orphan_profile = old.profile(orphan.id).unwrap();
+            let paths = old.paths(&orphan_profile);
+            fs::create_dir_all(&paths.root).unwrap();
+            fs::write(&paths.database, b"old portfolio").unwrap();
+            old.secret_store(&orphan_profile)
+                .set_secret("provider", "old credential")
+                .unwrap();
+            secrets.set_secret("provider", "legacy credential").unwrap();
+            drop(old);
+            for name in [REGISTRY_FILE, REGISTRY_BACKUP] {
+                if corrupt {
+                    fs::write(dir.path().join(name), b"broken registry").unwrap();
+                } else {
+                    fs::remove_file(dir.path().join(name)).unwrap();
+                }
+            }
+            let fresh =
+                ProfileRegistry::start_new(dir.path().into(), legacy.clone(), secrets.clone())
+                    .unwrap();
+            assert!(fresh.list().unwrap().is_empty());
+            let new = fresh.create("New", DEFAULT_PROFILE_AVATAR).unwrap();
+            let new_profile = fresh.profile(new.id).unwrap();
+            assert_ne!(new.id, orphan.id);
+            assert!(new_profile.legacy_database.is_none());
+            assert!(fresh
+                .secret_store(&new_profile)
+                .get_secret("provider")
+                .unwrap()
+                .is_none());
+            assert_eq!(
+                fresh
+                    .secret_store(&orphan_profile)
+                    .get_secret("provider")
+                    .unwrap()
+                    .as_deref(),
+                Some("old credential")
+            );
+            assert_eq!(
+                secrets.get_secret("provider").unwrap().as_deref(),
+                Some("legacy credential")
+            );
+            assert_eq!(fs::read(&legacy).unwrap(), b"legacy portfolio");
+            assert_eq!(fs::read(&paths.database).unwrap(), b"old portfolio");
+            if corrupt {
+                let archive = fs::read_dir(dir.path().join(REGISTRY_ARCHIVES))
+                    .unwrap()
+                    .next()
+                    .unwrap()
+                    .unwrap()
+                    .path();
+                for name in [REGISTRY_FILE, REGISTRY_BACKUP] {
+                    assert_eq!(fs::read(archive.join(name)).unwrap(), b"broken registry");
+                }
+            }
+            drop(fresh);
+            let reopened = ProfileRegistry::open(dir.path().into(), legacy, secrets).unwrap();
+            assert_eq!(reopened.default_id().unwrap(), new.id);
+            assert_eq!(reopened.list().unwrap().len(), 1);
+        }
+    }
+
+    #[test]
+    fn new_start_refuses_existing_ownership_and_usable_primary_or_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = dir.path().join("app.db");
+        let secrets = Arc::new(Secrets::default());
+        let existing =
+            ProfileRegistry::open(dir.path().into(), legacy.clone(), secrets.clone()).unwrap();
+        let original = fs::read(dir.path().join(REGISTRY_FILE)).unwrap();
+        assert!(
+            ProfileRegistry::start_new(dir.path().into(), legacy.clone(), secrets.clone()).is_err()
+        );
+        drop(existing);
+        assert!(
+            ProfileRegistry::start_new(dir.path().into(), legacy.clone(), secrets.clone()).is_err()
+        );
+        assert_eq!(fs::read(dir.path().join(REGISTRY_FILE)).unwrap(), original);
+        fs::write(dir.path().join(REGISTRY_BACKUP), &original).unwrap();
+        fs::write(dir.path().join(REGISTRY_FILE), b"broken").unwrap();
+        assert!(ProfileRegistry::start_new(dir.path().into(), legacy, secrets).is_err());
+        assert_eq!(
+            fs::read(dir.path().join(REGISTRY_BACKUP)).unwrap(),
+            original
+        );
+        assert!(!dir.path().join(REGISTRY_ARCHIVES).exists());
     }
 
     #[test]

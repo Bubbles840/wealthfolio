@@ -12,6 +12,7 @@ export interface ProfileState {
   pendingDeletions?: ProfileSummary[];
   session: ProfileSession | null;
   starting: boolean;
+  startupError?: string | null;
 }
 export async function profileCommand<T>(
   command: string,

@@ -29,6 +29,7 @@ pub struct ProfileState {
     pub pending_deletions: Vec<ProfileSummary>,
     pub session: Option<ProfileSession>,
     pub starting: bool,
+    pub startup_error: Option<String>,
 }
 
 fn portfolio_history_backfill_needed(context: &Arc<ServiceContext>) -> bool {
@@ -87,6 +88,14 @@ fn portfolio_history_backfill_needed(context: &Arc<ServiceContext>) -> bool {
 
 impl NativeProfiles {
     pub fn new(root: String) -> Result<Self, String> {
+        Self::open(root, false)
+    }
+
+    pub fn start_new(root: String) -> Result<Self, String> {
+        Self::open(root, true)
+    }
+
+    fn open(root: String, start_new: bool) -> Result<Self, String> {
         let (root, legacy) =
             match crate::data_dir::development_override(std::env::var_os("WF_DATA_DIR"))? {
                 Some(root) => {
@@ -98,8 +107,12 @@ impl NativeProfiles {
                     (root.into(), database.into())
                 }
             };
-        let registry = ProfileRegistry::open(root, legacy, shared_secret_store())
-            .map_err(|e| e.to_string())?;
+        let registry = if start_new {
+            ProfileRegistry::start_new(root, legacy, shared_secret_store())
+        } else {
+            ProfileRegistry::open(root, legacy, shared_secret_store())
+        }
+        .map_err(|e| e.to_string())?;
         for id in registry.pending_deletions().map_err(|e| e.to_string())? {
             if registry.finish_delete(id).is_err() {
                 log::warn!("Profile deletion cleanup needs a retry.");
@@ -192,6 +205,7 @@ impl NativeProfiles {
                 .map_err(|e| e.to_string())?,
             session,
             starting: self.starting.load(Ordering::SeqCst),
+            startup_error: None,
         })
     }
 
@@ -336,7 +350,9 @@ impl<'de, R: tauri::Runtime> tauri::ipc::CommandArg<'de, R> for ProfileAccess {
             _ => None,
         }
         .ok_or_else(|| tauri::ipc::InvokeError::from(ProfileError::Locked.to_string()))?;
-        let profiles = webview.state::<NativeProfiles>();
+        let profiles = webview
+            .try_state::<NativeProfiles>()
+            .ok_or_else(|| tauri::ipc::InvokeError::from(ProfileError::Locked.to_string()))?;
         let runtime = profiles
             .admit(scope)
             .map_err(tauri::ipc::InvokeError::from)?;
@@ -386,7 +402,9 @@ pub async fn delete_profile(
 ) -> Result<(), String> {
     // Keep cleanup running even if the renderer reloads or drops its IPC future.
     tauri::async_runtime::spawn(async move {
-        let state = handle.state::<NativeProfiles>();
+        let state = handle
+            .try_state::<NativeProfiles>()
+            .ok_or_else(|| ProfileError::Locked.to_string())?;
         let _transition = state.transition.lock().await;
         if !state.registry.is_deleting(profile_id) {
             let session = state
@@ -433,8 +451,20 @@ pub async fn delete_profile(
 }
 
 #[tauri::command]
-pub fn get_profile_state(state: tauri::State<'_, NativeProfiles>) -> Result<ProfileState, String> {
-    state.state()
+pub fn get_profile_state(handle: AppHandle) -> Result<ProfileState, String> {
+    if let Some(profiles) = handle.try_state::<NativeProfiles>() {
+        return profiles.state();
+    }
+    let error = handle
+        .state::<crate::profile_startup::ProfileStartup>()
+        .error()?;
+    Ok(ProfileState {
+        profiles: vec![],
+        pending_deletions: vec![],
+        session: None,
+        starting: error.is_none(),
+        startup_error: error,
+    })
 }
 
 #[tauri::command]
@@ -573,7 +603,9 @@ pub fn start_lock_monitor(handle: AppHandle) {
     tauri::async_runtime::spawn(async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            let profiles = handle.state::<NativeProfiles>();
+            let Some(profiles) = handle.try_state::<NativeProfiles>() else {
+                continue;
+            };
             if profiles.transition.try_lock().is_ok()
                 && !profiles.starting.load(Ordering::SeqCst)
                 && profiles.active().ok().flatten().is_some()

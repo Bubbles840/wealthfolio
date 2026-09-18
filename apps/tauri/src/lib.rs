@@ -10,6 +10,7 @@ mod events;
 mod listeners;
 mod mcp;
 mod profile_lifecycle;
+mod profile_startup;
 mod profiles;
 mod scheduler;
 mod secret_store;
@@ -102,8 +103,8 @@ mod desktop {
         // owns the background workers and retains their handles.
         tauri::async_runtime::spawn(async move {
             let context = handle
-                .state::<profiles::NativeProfiles>()
-                .startup(&handle)
+                .state::<profile_startup::ProfileStartup>()
+                .initialize(&handle)
                 .await;
             let menu_bar_visible = context
                 .as_ref()
@@ -162,8 +163,8 @@ mod mobile {
     /// Performs async setup on mobile without blocking the main thread.
     pub fn setup(handle: AppHandle) {
         tauri::async_runtime::spawn(async move {
-            let runtime = handle.state::<profiles::NativeProfiles>();
-            match runtime.startup(&handle).await {
+            let startup = handle.state::<profile_startup::ProfileStartup>();
+            match startup.initialize(&handle).await {
                 Ok(_) => emit_app_ready(&handle),
                 Err(e) => {
                     error!("Failed to initialize context on mobile: {}", e);
@@ -236,10 +237,11 @@ pub fn run() {
             // Embedded MCP server state (commands need it managed up front)
             handle.manage(mcp::McpServerState::default());
 
-            // The database runtime is managed before anything can reach it, and
-            // stays managed for the life of the process: maintenance takes its
-            // *contents*, never the state entry itself.
-            handle.manage(profiles::NativeProfiles::new(get_app_data_dir(&handle)?)?);
+            // Registry failures are recoverable. Platform setup opens profiles
+            // asynchronously while this state serves the startup recovery UI.
+            handle.manage(profile_startup::ProfileStartup::new(get_app_data_dir(
+                &handle,
+            )?));
 
             // Platform-specific plugin initialization
             #[cfg(desktop)]
@@ -259,11 +261,14 @@ pub fn run() {
                 log::debug!("Deep link received (count: {})", urls.len());
                 for url in urls {
                     if url.as_str().starts_with("wealthfolio://auth/") {
-                        let _ = deep_link_handle
-                            .state::<profiles::NativeProfiles>()
-                            .registry
-                            .auth_flows
-                            .capture_native(profiles::NATIVE_OWNER, url.as_str());
+                        if let Some(profiles) =
+                            deep_link_handle.try_state::<profiles::NativeProfiles>()
+                        {
+                            let _ = profiles
+                                .registry
+                                .auth_flows
+                                .capture_native(profiles::NATIVE_OWNER, url.as_str());
+                        }
                     }
                     let _ = deep_link_handle.emit("deep-link-received", url.to_string());
                 }
@@ -280,6 +285,9 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             profiles::get_profile_state,
+            profile_startup::retry_profile_startup,
+            profile_startup::start_new_profile_setup,
+            profile_startup::open_profile_data_folder,
             profiles::profile_auth_storage,
             profiles::capture_profile_auth_callback,
             profiles::create_profile,
