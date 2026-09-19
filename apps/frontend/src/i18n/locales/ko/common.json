@@ -459,6 +459,7 @@
     "avatar3d": "3D",
     "avatarAbstract": "추상",
     "errors": {
+      "originRejected": "요청 출처가 거부되었습니다. 리버스 프록시 뒤에서 Wealthfolio를 직접 호스팅하는 경우 공개 Host 헤더를 유지하거나 WF_CORS_ALLOW_ORIGINS를 브라우저에 표시된 정확한 출처(스킴, 호스트 이름, 포트)로 설정하세요.",
       "generic": "문제가 발생했습니다. 다시 시도하세요.",
       "locked": "계속하려면 프로필 비밀번호를 입력하세요.",
       "stale": "세션이 종료되었습니다. 프로필 잠금을 다시 해제하세요.",

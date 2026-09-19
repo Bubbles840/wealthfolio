@@ -644,3 +644,159 @@ async fn quote_resets_use_the_admitted_profile_runtime() {
         StatusCode::LOCKED
     );
 }
+
+#[tokio::test]
+async fn proxy_origin_configuration_allows_startup_but_rejects_untrusted_mutations() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = test_config(dir.path());
+    config.cors_allow = vec!["https://portfolio.example.com:8443".into()];
+    let state = build_state(&config).await.unwrap();
+    let root = WebProfiles::new(state.clone(), &config).unwrap();
+    let router = profiles::router(root.clone())
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            wealthfolio_server::auth::require_jwt,
+        ))
+        .with_state(state);
+    let request = |command: &str, origin: &str, body: Value| {
+        Request::builder()
+            .uri(format!("/profiles/{command}"))
+            .method("POST")
+            .header("content-type", "application/json")
+            .header("host", "wealthfolio:8088")
+            .header("origin", origin)
+            .header("sec-fetch-site", "same-origin")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    };
+    let response = router
+        .clone()
+        .oneshot(request(
+            "get_profile_state",
+            "https://portfolio.example.com:8443",
+            json!({}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 1024 * 1024).await.unwrap())
+            .unwrap();
+    assert!(body["session"]["scopeId"].is_string());
+    let before = root.registry.list().unwrap().len();
+    for origin in [
+        "https://evil.test",
+        "https://portfolio.example.com",
+        "http://portfolio.example.com:8443",
+    ] {
+        let response = router
+            .clone()
+            .oneshot(request(
+                "create_profile",
+                origin,
+                json!({"name":"Untrusted", "avatarId":"clay-fluff-animated"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::LOCKED);
+        let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("PROFILE_ORIGIN_REJECTED"));
+        assert_eq!(root.registry.list().unwrap().len(), before);
+    }
+}
+
+#[tokio::test]
+async fn admitted_ndjson_stream_delivers_incrementally_and_closes_on_lock() {
+    use futures::StreamExt;
+    let dir = tempfile::tempdir().unwrap();
+    let config = test_config(dir.path());
+    let state = build_state(&config).await.unwrap();
+    let root = WebProfiles::new(state.clone(), &config).unwrap();
+    let (chunks, receiver) =
+        tokio::sync::mpsc::channel::<Result<String, std::convert::Infallible>>(4);
+    let receiver = Arc::new(tokio::sync::Mutex::new(Some(receiver)));
+    // Exercise the same admitted response-body path as AI NDJSON, without an
+    // external AI provider or a completed response masking buffering regressions.
+    let router = Router::new()
+        .route(
+            "/stream",
+            get(move || {
+                let receiver = receiver.clone();
+                async move {
+                    let stream = tokio_stream::wrappers::ReceiverStream::new(
+                        receiver.lock().await.take().unwrap(),
+                    );
+                    (
+                        [("content-type", "application/x-ndjson")],
+                        Body::from_stream(stream),
+                    )
+                }
+            }),
+        )
+        .layer(middleware::from_fn_with_state(
+            root.clone(),
+            profiles::admit,
+        ))
+        .merge(profiles::router(root))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            wealthfolio_server::auth::require_jwt,
+        ))
+        .with_state(state);
+    let (_, initial, cookie) = send(
+        &router,
+        "/profiles/get_profile_state",
+        json!({}),
+        None,
+        None,
+    )
+    .await;
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/stream")
+                .header("cookie", cookie.as_deref().unwrap())
+                .header(
+                    "x-wf-profile-scope",
+                    initial["session"]["scopeId"].as_str().unwrap(),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut body = response.into_body().into_data_stream();
+    for text in [
+        "{\"type\":\"system\"}\n",
+        "{\"type\":\"textDelta\",\"text\":\"test\"}\n",
+    ] {
+        chunks.send(Ok(text.into())).await.unwrap();
+        let chunk = tokio::time::timeout(Duration::from_secs(2), body.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(chunk.as_ref(), text.as_bytes());
+    }
+    let next = body.next();
+    tokio::pin!(next);
+    assert!(tokio::time::timeout(Duration::from_millis(20), &mut next)
+        .await
+        .is_err());
+    let (status, _, _) = send(
+        &router,
+        "/profiles/lock_profile",
+        json!({}),
+        cookie.as_deref(),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    // The producer is still open; revocation must end even an idle stream.
+    assert!(tokio::time::timeout(Duration::from_secs(2), next)
+        .await
+        .unwrap()
+        .is_none());
+}

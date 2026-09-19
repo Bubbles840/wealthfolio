@@ -9,6 +9,10 @@ beforeAll(async () => {
 });
 
 it.each([
+  [
+    "PROFILE_ORIGIN_REJECTED: /private/secret/internal-details",
+    "The request origin was rejected. If you self-host Wealthfolio behind a reverse proxy, preserve the public Host header or set WF_CORS_ALLOW_ORIGINS to the exact origin shown in your browser (scheme, hostname, and port).",
+  ],
   ["PROFILE_LOCKED", "Enter your profile password to continue."],
   ["PROFILE_STALE", "Your session has ended. Unlock your profile again."],
   ["PROFILE_NOT_FOUND", "This profile is no longer available. Choose another profile."],
@@ -71,6 +75,9 @@ describe.each(Object.entries(catalogs))("profile translations: %s", (path, catal
     const t = instance.getFixedT(lang, "common");
     expect(profileErrorMessage("PROFILE_COOLDOWN: Try again in 30 seconds.", t)).toBe(
       catalog.default.profiles.errors.cooldown_other.replace("{{count}}", "30"),
+    );
+    expect(profileErrorMessage("PROFILE_ORIGIN_REJECTED: internal details", t)).toBe(
+      catalog.default.profiles.errors.originRejected,
     );
     expect(profileErrorMessage("CONNECT_REBIND_REQUIRED: internal details", t)).toBe(
       catalog.default.profiles.errors.rebind,

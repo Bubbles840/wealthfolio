@@ -459,6 +459,7 @@
     "avatar3d": "3D",
     "avatarAbstract": "抽象",
     "errors": {
+      "originRejected": "请求来源被拒绝。如果您通过反向代理自行托管 Wealthfolio，请保留公开的 Host 请求头，或将 WF_CORS_ALLOW_ORIGINS 设置为浏览器中显示的确切来源（协议、主机名和端口）。",
       "generic": "出现了问题。请重试。",
       "locked": "请输入个人资料密码以继续。",
       "stale": "您的会话已结束。请重新解锁个人资料。",

@@ -324,22 +324,47 @@ fn scope(headers: &axum::http::HeaderMap) -> Result<Uuid> {
         .and_then(|s| Uuid::parse_str(s).ok())
         .ok_or_else(|| failure("PROFILE_LOCKED"))
 }
-fn same_origin(headers: &axum::http::HeaderMap) -> bool {
+// Accept only serialized HTTP(S) origins, never URLs with credentials or paths.
+fn browser_origin(value: &str) -> Option<reqwest::Url> {
+    let (_, authority) = value.split_once("://")?;
+    if authority.is_empty()
+        || authority.contains(['/', '?', '#', '@', '\\'])
+        || value.chars().any(char::is_whitespace)
+    {
+        return None;
+    }
+    let origin = reqwest::Url::parse(value).ok()?;
+    matches!(origin.scheme(), "http" | "https").then_some(origin)
+}
+
+fn allowed_profile_origin(headers: &axum::http::HeaderMap, configured: &[String]) -> bool {
     if headers
         .get("sec-fetch-site")
         .is_some_and(|v| v != "same-origin" && v != "none")
     {
         return false;
     }
-    match headers.get("origin") {
-        None => true, // Non-browser API clients do not send Origin.
-        Some(origin) => origin
-            .to_str()
-            .ok()
-            .and_then(|v| v.parse::<axum::http::Uri>().ok())
-            .zip(headers.get("host").and_then(|v| v.to_str().ok()))
-            .is_some_and(|(origin, host)| origin.authority().is_some_and(|a| a.as_str() == host)),
+    if headers.get_all("origin").iter().count() > 1 {
+        return false;
     }
+    let Some(value) = headers.get("origin") else {
+        return true; // Preserve non-browser API clients that omit Origin.
+    };
+    let Some(origin) = value.to_str().ok().and_then(browser_origin) else {
+        return false;
+    };
+    // Preserve direct access and TLS termination without trusting forwarded headers.
+    let host_matches = headers.get_all("host").iter().count() == 1
+        && headers
+            .get("host")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|host| browser_origin(&format!("{}://{host}", origin.scheme())))
+            .is_some_and(|host| host.origin() == origin.origin());
+    host_matches
+        || configured.iter().any(|value| {
+            // Wildcard CORS is not permission to mutate profile grants.
+            browser_origin(value).is_some_and(|allowed| allowed.origin() == origin.origin())
+        })
 }
 
 async fn command(
@@ -350,8 +375,8 @@ async fn command(
     Json(body): Json<Value>,
 ) -> Result<Json<Value>> {
     // JSON-only POST plus same-origin checks prevent cross-site grant mutations.
-    if !same_origin(&headers) {
-        return Err(failure("Cross-site profile requests are not allowed"));
+    if !allowed_profile_origin(&headers, &root.config.cors_allow) {
+        return Err(failure("PROFILE_ORIGIN_REJECTED: Preserve the public Host header or configure its exact origin in WF_CORS_ALLOW_ORIGINS. Cross-site profile requests are not allowed."));
     }
     let registry = root.registry.clone();
     let admitted = || {
@@ -753,6 +778,111 @@ pub(crate) fn offline_database(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn profile_origin_policy_handles_direct_and_proxied_requests() {
+        use axum::http::{HeaderMap, HeaderValue};
+        let allowed = vec![
+            "https://portfolio.example.com".into(),
+            "https://portfolio.example.com:8443".into(),
+            "http://192.168.1.10:8088".into(),
+        ];
+        for (origin, host, expected) in [
+            ("http://localhost:1420", "localhost:1420", true),
+            ("http://192.168.1.10:8088", "192.168.1.10:8088", true),
+            ("http://[::1]:8088", "[::1]:8088", true),
+            (
+                "https://portfolio.example.com",
+                "portfolio.example.com",
+                true,
+            ),
+            ("https://portfolio.example.com", "wealthfolio:8088", true),
+            (
+                "https://portfolio.example.com:443",
+                "wealthfolio:8088",
+                true,
+            ),
+            ("https://PORTFOLIO.example.com", "wealthfolio:8088", true),
+            (
+                "https://portfolio.example.com:8443",
+                "portfolio.example.com",
+                true,
+            ),
+            ("http://portfolio.example.com", "wealthfolio:8088", false),
+            (
+                "https://portfolio.example.com:8444",
+                "wealthfolio:8088",
+                false,
+            ),
+            ("https://other.example.com", "wealthfolio:8088", false),
+            (
+                "https://portfolio.example.com.evil.test",
+                "wealthfolio:8088",
+                false,
+            ),
+            ("https://evil.test", "wealthfolio:8088", false),
+            ("null", "wealthfolio:8088", false),
+            (
+                "https://portfolio.example.com/path",
+                "portfolio.example.com",
+                false,
+            ),
+            (
+                "https://user@portfolio.example.com",
+                "portfolio.example.com",
+                false,
+            ),
+            (
+                "ftp://portfolio.example.com",
+                "portfolio.example.com",
+                false,
+            ),
+            (
+                "https://portfolio.example.com?x",
+                "portfolio.example.com",
+                false,
+            ),
+            (
+                "https://portfolio.example.com#x",
+                "portfolio.example.com",
+                false,
+            ),
+            (
+                "https://portfolio.example.com https://evil.test",
+                "portfolio.example.com",
+                false,
+            ),
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert("origin", HeaderValue::from_str(origin).unwrap());
+            headers.insert("host", HeaderValue::from_str(host).unwrap());
+            assert_eq!(
+                allowed_profile_origin(&headers, &allowed),
+                expected,
+                "{origin} via {host}"
+            );
+            headers.insert("sec-fetch-site", HeaderValue::from_static("same-origin"));
+            assert_eq!(allowed_profile_origin(&headers, &allowed), expected);
+            for site in ["same-site", "cross-site"] {
+                headers.insert("sec-fetch-site", HeaderValue::from_static(site));
+                assert!(!allowed_profile_origin(&headers, &allowed));
+            }
+        }
+        let mut headers = HeaderMap::new();
+        assert!(allowed_profile_origin(&headers, &[]));
+        headers.insert("sec-fetch-site", HeaderValue::from_static("cross-site"));
+        assert!(!allowed_profile_origin(&headers, &allowed));
+        headers.remove("sec-fetch-site");
+        headers.insert(
+            "origin",
+            HeaderValue::from_static("https://portfolio.example.com"),
+        );
+        headers.insert("host", HeaderValue::from_static("wealthfolio:8088"));
+        assert!(!allowed_profile_origin(&headers, &["*".into()]));
+        assert!(!allowed_profile_origin(&headers, &[]));
+        headers.append("origin", HeaderValue::from_static("https://evil.test"));
+        assert!(!allowed_profile_origin(&headers, &allowed));
+    }
+
     #[tokio::test]
     async fn connect_contention_is_retryable_without_revoking_profile() {
         use axum::routing::get;
@@ -836,14 +966,14 @@ mod tests {
     #[test]
     fn grant_mutations_reject_cross_origin_and_sibling_sites() {
         let mut headers = axum::http::HeaderMap::new();
-        assert!(same_origin(&headers));
+        assert!(allowed_profile_origin(&headers, &[]));
         headers.insert("host", "wealthfolio.test".parse().unwrap());
         headers.insert("origin", "https://wealthfolio.test".parse().unwrap());
-        assert!(same_origin(&headers));
+        assert!(allowed_profile_origin(&headers, &[]));
         headers.insert("origin", "https://other.test".parse().unwrap());
-        assert!(!same_origin(&headers));
+        assert!(!allowed_profile_origin(&headers, &[]));
         headers.remove("origin");
         headers.insert("sec-fetch-site", "same-site".parse().unwrap());
-        assert!(!same_origin(&headers));
+        assert!(!allowed_profile_origin(&headers, &[]));
     }
 }

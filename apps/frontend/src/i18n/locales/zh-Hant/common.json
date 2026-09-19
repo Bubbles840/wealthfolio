@@ -468,6 +468,7 @@
     "avatar3d": "3D",
     "avatarAbstract": "抽象",
     "errors": {
+      "originRejected": "請求來源遭到拒絕。如果您透過反向代理自行託管 Wealthfolio，請保留公開的 Host 請求標頭，或將 WF_CORS_ALLOW_ORIGINS 設為瀏覽器中顯示的確切來源（通訊協定、主機名稱及連接埠）。",
       "generic": "發生了問題。請重試。",
       "locked": "請輸入個人資料密碼以繼續。",
       "stale": "您的工作階段已結束。請重新解鎖個人資料。",

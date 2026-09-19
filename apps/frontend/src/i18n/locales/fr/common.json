@@ -482,6 +482,7 @@
     "avatar3d": "3D",
     "avatarAbstract": "Abstrait",
     "errors": {
+      "originRejected": "L’origine de la requête a été refusée. Si vous hébergez Wealthfolio derrière un proxy inverse, conservez l’en-tête Host public ou définissez WF_CORS_ALLOW_ORIGINS sur l’origine exacte affichée dans votre navigateur (protocole, nom d’hôte et port).",
       "generic": "Une erreur est survenue. Veuillez réessayer.",
       "locked": "Saisissez le mot de passe de votre profil pour continuer.",
       "stale": "Votre session est terminée. Déverrouillez à nouveau votre profil.",
