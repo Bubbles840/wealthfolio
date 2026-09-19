@@ -41,7 +41,7 @@ impl ResetProviderHistoryError {
 #[tauri::command]
 pub async fn reset_provider_history(
     asset_id: String,
-    state: State<'_, DatabaseRuntime>,
+    state: ProfileAccess,
 ) -> Result<wealthfolio_core::quotes::ResetProviderHistoryResult, ResetProviderHistoryError> {
     let context = state
         .context()
@@ -65,7 +65,7 @@ pub async fn reset_provider_history(
 
 #[tauri::command]
 pub async fn reset_all_provider_history(
-    state: State<'_, DatabaseRuntime>,
+    state: ProfileAccess,
 ) -> Result<wealthfolio_core::quotes::ResetAllProviderHistoryResult, ResetProviderHistoryError> {
     let context = state
         .context()

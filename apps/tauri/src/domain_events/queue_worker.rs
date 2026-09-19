@@ -226,7 +226,12 @@ async fn process_event_batch(
                     payload.account_ids = Some(accounts.into_iter().map(|a| a.id).collect())
                 }
                 Err(error) => {
-                    let _ = app_handle.emit(PORTFOLIO_UPDATE_ERROR, error.to_string());
+                    let _ = crate::events::emit_for_profile(
+                        app_handle,
+                        context,
+                        PORTFOLIO_UPDATE_ERROR,
+                        error.to_string(),
+                    );
                     return;
                 }
             }

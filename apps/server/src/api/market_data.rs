@@ -204,7 +204,9 @@ async fn delete_quote(
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn sync_history_quotes(axum::Extension(state): axum::Extension<Arc<AppState>>) -> ApiResult<StatusCode> {
+async fn sync_history_quotes(
+    axum::Extension(state): axum::Extension<Arc<AppState>>,
+) -> ApiResult<StatusCode> {
     let result = tokio::spawn(async move {
         let result = state.quote_service.resync(None).await;
         if result.as_ref().is_ok_and(|result| result.synced > 0) {
@@ -402,6 +404,6 @@ pub fn router<S: Clone + Send + Sync + 'static>() -> Router<S> {
 mod tests {
     #[test]
     fn reset_routes_register_alongside_existing_quote_routes() {
-        let _ = super::router();
+        let _ = super::router::<()>();
     }
 }

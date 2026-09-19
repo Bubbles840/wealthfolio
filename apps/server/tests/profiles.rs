@@ -570,3 +570,77 @@ async fn missing_adopted_legacy_database_is_not_recreated_with_retained_credenti
         Some("preserved-token")
     );
 }
+
+#[tokio::test]
+async fn quote_resets_use_the_admitted_profile_runtime() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = test_config(dir.path());
+    let state = build_state(&config).await.unwrap();
+    let router = wealthfolio_server::api::app_router(state, &config).unwrap();
+    let (_, profiles, cookie_a) = send(
+        &router,
+        "/api/v1/profiles/get_profile_state",
+        json!({}),
+        None,
+        None,
+    )
+    .await;
+    let first = profiles["profiles"][0]["id"].clone();
+    let (status, second, _) = send(
+        &router,
+        "/api/v1/profiles/create_profile",
+        json!({"name": "Second", "avatarId": "default"}),
+        cookie_a.as_deref(),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+    let (_, _, cookie_b) = send(
+        &router,
+        "/api/v1/profiles/get_profile_state",
+        json!({}),
+        None,
+        None,
+    )
+    .await;
+    let mut scopes = Vec::new();
+    for (cookie, id) in [
+        (cookie_a.as_deref(), first),
+        (cookie_b.as_deref(), second["id"].clone()),
+    ] {
+        let (status, grant, _) = send(
+            &router,
+            "/api/v1/profiles/unlock_profile",
+            json!({"profileId": id}),
+            cookie,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{grant}");
+        let scope = grant["scopeId"].as_str().unwrap().to_owned();
+        // Empty profiles exercise the real handler without any provider network I/O.
+        let (status, body, _) = send(
+            &router,
+            "/api/v1/market-data/quotes/reset",
+            json!({}),
+            cookie,
+            Some(&scope),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["results"], json!([]));
+        scopes.push(scope);
+    }
+    assert_eq!(
+        send(
+            &router,
+            "/api/v1/market-data/quotes/reset",
+            json!({}),
+            cookie_b.as_deref(),
+            Some(&scopes[0]),
+        )
+        .await
+        .0,
+        StatusCode::LOCKED
+    );
+}
