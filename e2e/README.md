@@ -45,9 +45,12 @@ restarting the server on every run.
 node scripts/prep-e2e.mjs
 ```
 
-This creates a new timestamped SQLite database (e.g.
-`db/app-testing-20260411T120000Z.db`) and writes its path to `.env.web`. **Run
-this every time** before starting the server — it ensures test isolation.
+This creates a unique timestamped data directory (e.g.
+`db/app-testing-20260411T120000Z-XXXXXX/`) and writes its database, vault, and
+addon paths to `.env.web`. The profile registry and profile databases stay in
+that directory too. **Run this every time** before starting the server —
+changing only the database filename would reuse the previous installation's
+profiles.
 
 #### Step 2 — Start the web app
 
