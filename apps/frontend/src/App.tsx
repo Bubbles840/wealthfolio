@@ -1,6 +1,5 @@
 import { ProfileShell } from "@/features/profiles/profile-shell";
 import { NativeDatabaseGate } from "@/features/database-recovery/native-database-gate";
-import { RestoredPortfolioNotice } from "@/features/database-recovery/restored-portfolio-notice";
 import { isWeb } from "@/adapters";
 import { AddonRuntimeLoader } from "@/addons/addon-runtime-loader";
 import { setAddonQueryClient } from "@/addons/addons-runtime-context";
@@ -41,7 +40,6 @@ function App() {
         <PrivacyProvider>
           <TooltipProvider>
             <Toaster mobileOffset={{ top: "68px" }} closeButton expand={false} />
-            <RestoredPortfolioNotice />
             <AddonRuntimeLoader />
             <EventDialogProvider>
               <AssetLogoRegistrySync />

@@ -27,6 +27,10 @@ pub async fn get_accounts(
 
 #[tauri::command]
 pub async fn create_account(account: NewAccount, state: ProfileAccess) -> Result<Account, String> {
+    // A supplied broker link must not race replacement of its Connect identity.
+    let _connect = (account.provider.is_some() || account.provider_account_id.is_some())
+        .then(|| state.connect_guard())
+        .transpose()?;
     let context = state.context()?;
     debug!("Adding new account...");
     // Domain events handle recalculation automatically

@@ -15,6 +15,7 @@ use zeroize::Zeroizing;
 
 pub const NATIVE_OWNER: &str = "main";
 pub const PROFILE_CHANGED: &str = "profile-session-changed";
+const CONNECT_TRANSITION_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
 
 pub struct NativeProfiles {
     pub registry: Arc<ProfileRegistry>,
@@ -328,6 +329,25 @@ impl NativeProfiles {
         }
         Ok(runtime)
     }
+
+    pub async fn begin_connect_transition(
+        &self,
+        scope: Uuid,
+        runtime: &Arc<DatabaseRuntime>,
+    ) -> Result<tokio::sync::OwnedRwLockWriteGuard<()>, String> {
+        // Let admitted Connect operations finish before replacing their identity.
+        let transition = tokio::time::timeout(
+            CONNECT_TRANSITION_WAIT,
+            runtime.connect_transition.clone().write_owned(),
+        )
+        .await
+        .map_err(|_| "Profile operations are running. Wait for them to finish and try again.")?;
+        // A restore, lock or profile switch may have invalidated the caller while waiting.
+        if !Arc::ptr_eq(runtime, &self.admit(scope)?) {
+            return Err(ProfileError::Stale.to_string());
+        }
+        Ok(transition)
+    }
 }
 
 /// Command-boundary access to the runtime admitted for the caller's profile session.
@@ -336,10 +356,46 @@ impl NativeProfiles {
 /// and does not cancel work already admitted. Database operations separately enforce
 /// suspension and maintenance gates. Internal helpers should accept only the service,
 /// runtime or path they need, retaining runtime/file leases for database work.
-pub struct ProfileAccess(
-    pub Arc<DatabaseRuntime>,
-    #[allow(dead_code)] Option<tokio::sync::OwnedRwLockReadGuard<()>>,
-);
+pub struct ProfileAccess(pub Arc<DatabaseRuntime>);
+
+impl ProfileAccess {
+    /// Mixed commands take this only when changing Connect-owned state.
+    pub fn connect_guard(&self) -> Result<tokio::sync::OwnedRwLockReadGuard<()>, String> {
+        self.connect_transition
+            .clone()
+            .try_read_owned()
+            .map_err(|_| "Connect account change is in progress. Try again.".to_string())
+    }
+}
+
+/// Profile access plus admission for work that depends on the Connect identity.
+/// Keep the guard for the complete command, including work after network awaits.
+pub struct ConnectAccess {
+    profile: ProfileAccess,
+    _guard: tokio::sync::OwnedRwLockReadGuard<()>,
+}
+
+impl std::ops::Deref for ConnectAccess {
+    type Target = ProfileAccess;
+    fn deref(&self) -> &Self::Target {
+        &self.profile
+    }
+}
+
+impl<'de, R: tauri::Runtime> tauri::ipc::CommandArg<'de, R> for ConnectAccess {
+    fn from_command(
+        command: tauri::ipc::CommandItem<'de, R>,
+    ) -> Result<Self, tauri::ipc::InvokeError> {
+        let profile = ProfileAccess::from_command(command)?;
+        let guard = profile
+            .connect_guard()
+            .map_err(tauri::ipc::InvokeError::from)?;
+        Ok(Self {
+            profile,
+            _guard: guard,
+        })
+    }
+}
 
 impl std::ops::Deref for ProfileAccess {
     type Target = Arc<DatabaseRuntime>;
@@ -387,22 +443,7 @@ impl<'de, R: tauri::Runtime> tauri::ipc::CommandArg<'de, R> for ProfileAccess {
         {
             return Err("Profile database is unavailable; open recovery first".into());
         }
-        let admission = if command.message.command() == "store_sync_session" {
-            None
-        } else {
-            Some(
-                runtime
-                    .connect_transition
-                    .clone()
-                    .try_read_owned()
-                    .map_err(|_| {
-                        tauri::ipc::InvokeError::from(
-                            "Connect account change is in progress. Try again.",
-                        )
-                    })?,
-            )
-        };
-        Ok(Self(runtime, admission))
+        Ok(Self(runtime))
     }
 }
 
@@ -720,6 +761,178 @@ mod sync_state_tests {
             self.0.lock().unwrap().remove(key);
             Ok(())
         }
+    }
+
+    fn connect_profile() -> (
+        tempfile::TempDir,
+        NativeProfiles,
+        Arc<DatabaseRuntime>,
+        Uuid,
+    ) {
+        let directory = tempfile::tempdir().unwrap();
+        let registry = Arc::new(
+            ProfileRegistry::open(
+                directory.path().to_path_buf(),
+                directory.path().join("app.db"),
+                Arc::new(Secrets::default()),
+            )
+            .unwrap(),
+        );
+        let id = registry
+            .create("Test", wealthfolio_core::profiles::PROFILE_AVATARS[0])
+            .unwrap()
+            .id;
+        let runtime = Arc::new(profile_runtime(&registry, id, &mut HashMap::new()).unwrap());
+        let session = registry
+            .sessions
+            .issue(NATIVE_OWNER, id, false, None)
+            .unwrap();
+        let profiles = NativeProfiles {
+            registry,
+            active: Mutex::new(Some(runtime.clone())),
+            lifecycle: tokio::sync::Mutex::new(HashMap::new()),
+            starting: AtomicBool::new(false),
+            lock_epoch: AtomicU64::new(0),
+        };
+        (directory, profiles, runtime, session.scope_id)
+    }
+
+    #[tokio::test]
+    async fn holdings_ipc_is_independent_of_connect_but_still_requires_profile_access() {
+        use crate::commands::{portfolio, secrets};
+        use tauri::test::{get_ipc_response, mock_builder, mock_context, noop_assets};
+
+        let (_directory, profiles, runtime, scope) = connect_profile();
+        runtime.initialize_for_test().await;
+        let scope = profiles
+            .registry
+            .sessions
+            .rotate(NATIVE_OWNER, scope, runtime.generation())
+            .unwrap()
+            .scope_id;
+        let app = mock_builder()
+            .manage(profiles)
+            .invoke_handler(tauri::generate_handler![
+                portfolio::get_holdings_list,
+                secrets::get_profile_sync_identity
+            ])
+            .build(mock_context(noop_assets()))
+            .unwrap();
+        let window = tauri::WebviewWindowBuilder::new(&app, NATIVE_OWNER, Default::default())
+            .build()
+            .unwrap();
+        let invoke = |command: &str, scope: Uuid| {
+            get_ipc_response(
+                &window,
+                tauri::webview::InvokeRequest {
+                    cmd: command.into(),
+                    callback: tauri::ipc::CallbackFn(0),
+                    error: tauri::ipc::CallbackFn(1),
+                    url: if cfg!(windows) {
+                        "http://tauri.localhost"
+                    } else {
+                        "tauri://localhost"
+                    }
+                    .parse()
+                    .unwrap(),
+                    body: tauri::ipc::InvokeBody::Json(serde_json::json!({
+                        "scopeId": scope, "filter": {"type": "all"}
+                    })),
+                    headers: Default::default(),
+                    invoke_key: tauri::test::INVOKE_KEY.into(),
+                },
+            )
+        };
+
+        // Login already owns the lock: actual portfolio IPC must still complete.
+        let transition = runtime.connect_transition.clone().write_owned().await;
+        invoke("get_holdings_list", scope).expect("Holdings must be independent of Connect");
+        assert_eq!(
+            invoke("get_profile_sync_identity", scope).unwrap_err(),
+            "Connect account change is in progress. Try again."
+        );
+        assert!(invoke("get_holdings_list", Uuid::new_v4()).is_err());
+        drop(transition);
+        assert!(invoke("get_profile_sync_identity", scope).is_ok());
+
+        // A queued login also leaves local reads available.
+        let request = runtime.connect_transition.clone().read_owned().await;
+        let profiles = app.state::<NativeProfiles>();
+        let mut login = Box::pin(profiles.begin_connect_transition(scope, &runtime));
+        assert!(futures::poll!(login.as_mut()).is_pending());
+        invoke("get_holdings_list", scope).expect("Holdings must be independent of Connect");
+        drop(request);
+        drop(login.await.unwrap());
+        profiles.registry.sessions.revoke(NATIVE_OWNER).unwrap();
+        assert!(invoke("get_holdings_list", scope).is_err());
+        runtime.shutdown_for_test().await;
+    }
+
+    #[tokio::test]
+    async fn connect_login_waits_for_an_admitted_connect_request() {
+        let (_directory, profiles, runtime, scope) = connect_profile();
+        let connect_request = runtime.connect_transition.clone().try_read_owned().unwrap();
+        let mut login = Box::pin(profiles.begin_connect_transition(scope, &runtime));
+        assert!(futures::poll!(login.as_mut()).is_pending());
+        // New work cannot jump ahead of the waiting account transition.
+        assert!(runtime.connect_transition.clone().try_read_owned().is_err());
+        drop(connect_request);
+        let transition = login.await.unwrap();
+        assert!(runtime.connect_transition.clone().try_read_owned().is_err());
+        drop(transition);
+        assert!(runtime.connect_transition.clone().try_read_owned().is_ok());
+    }
+
+    #[tokio::test]
+    async fn connect_login_rechecks_scope_after_waiting() {
+        let (_directory, profiles, runtime, scope) = connect_profile();
+        let connect_request = runtime.connect_transition.clone().try_read_owned().unwrap();
+        let mut login = Box::pin(profiles.begin_connect_transition(scope, &runtime));
+        assert!(futures::poll!(login.as_mut()).is_pending());
+        // Restore rotates the caller's scope when the database generation changes.
+        profiles
+            .registry
+            .sessions
+            .rotate(NATIVE_OWNER, scope, Some(Uuid::new_v4()))
+            .unwrap();
+        drop(connect_request);
+        assert_eq!(login.await.unwrap_err(), ProfileError::Stale.to_string());
+        assert!(runtime.connect_transition.clone().try_write_owned().is_ok());
+    }
+
+    #[tokio::test]
+    async fn connect_login_rechecks_profile_lock_after_waiting() {
+        let (_directory, profiles, runtime, scope) = connect_profile();
+        let connect_request = runtime.connect_transition.clone().try_read_owned().unwrap();
+        let mut login = Box::pin(profiles.begin_connect_transition(scope, &runtime));
+        assert!(futures::poll!(login.as_mut()).is_pending());
+        profiles.registry.sessions.revoke(NATIVE_OWNER).unwrap();
+        drop(connect_request);
+        assert_eq!(login.await.unwrap_err(), ProfileError::Locked.to_string());
+        assert!(runtime.connect_transition.clone().try_write_owned().is_ok());
+    }
+
+    #[tokio::test]
+    async fn connect_login_timeout_preserves_the_running_request_and_reopens_admission() {
+        let (_directory, profiles, runtime, scope) = connect_profile();
+        let connect_request = runtime.connect_transition.clone().try_read_owned().unwrap();
+        let error = profiles
+            .begin_connect_transition(scope, &runtime)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error,
+            "Profile operations are running. Wait for them to finish and try again."
+        );
+        // Timing out cancels only the queued login; it never unlocks the running request.
+        assert!(runtime
+            .connect_transition
+            .clone()
+            .try_write_owned()
+            .is_err());
+        assert!(runtime.connect_transition.clone().try_read_owned().is_ok());
+        drop(connect_request);
+        assert!(runtime.connect_transition.clone().try_write_owned().is_ok());
     }
 
     #[test]

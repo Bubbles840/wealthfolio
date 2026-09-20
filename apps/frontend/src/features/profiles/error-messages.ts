@@ -51,3 +51,24 @@ export function profileErrorMessage(error: unknown, t: TFunction<"common">): str
       return t("profiles.errors.generic");
   }
 }
+
+/** Map profile failures while preserving unrelated feature messages. */
+export function profileAwareErrorMessage(message: string, t: TFunction<"common">): string {
+  if (/\b(?:PROFILE_[A-Z_]+|CONNECT_[A-Z_]+)\b/.test(message)) {
+    return profileErrorMessage(message, t);
+  }
+  if (
+    message.includes("Profile operations are running") ||
+    message.includes("Connect account change is in progress")
+  ) {
+    return t("profiles.errors.busy");
+  }
+  if (message.includes("No pending profile login")) return t("profiles.errors.stale");
+  if (
+    message.includes("Profile runtime is unavailable") ||
+    message.includes("Profile database is unavailable")
+  ) {
+    return t("profiles.errors.unavailable");
+  }
+  return message;
+}

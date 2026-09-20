@@ -80,7 +80,7 @@ pub fn run_profile_database_restore(
         },
         &owner,
     )?;
-    println!("Restore completed. Reconnect Wealthfolio Connect, device sync and custom data providers after starting the server.");
+    println!("Restore completed. Reconnect Wealthfolio Connect and device sync after starting the server.");
     if let Some(backup) = outcome.pre_operation_backup {
         println!("Previous database snapshot: {backup}");
     }

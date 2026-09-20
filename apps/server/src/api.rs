@@ -379,3 +379,6 @@ mod security_header_tests {
         assert!(csp.contains("media-src 'self' data: blob:"));
     }
 }
+
+#[cfg(test)]
+mod connect_admission_tests;

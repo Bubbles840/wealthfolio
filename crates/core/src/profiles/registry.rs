@@ -1564,7 +1564,10 @@ mod tests {
             user_id: "user-a".into(),
             team_id: Some("team".into()),
         };
+        assert!(!ProfileSummary::from(&registry.profile(a).unwrap()).has_connect_binding);
         registry.bind_connect(a, binding.clone()).unwrap();
+        assert!(ProfileSummary::from(&registry.profile(a).unwrap()).has_connect_binding);
+        assert!(!ProfileSummary::from(&registry.profile(b).unwrap()).has_connect_binding);
         registry
             .update(a, "New name", "clay-fluff-animated")
             .unwrap();

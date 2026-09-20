@@ -624,9 +624,9 @@ impl DatabaseRuntime {
         }
         match context.settings_service().requires_cloud_reconnect() {
             Ok(true) => {
-                if let Err(error) = wealthfolio_connect::clear_restored_installation_credentials(
-                    self.secret_store.as_ref(),
-                ) {
+                if let Err(error) =
+                    wealthfolio_connect::clear_restored_sync_identity(self.secret_store.as_ref())
+                {
                     warn!("Cloud reconnection remains required: {error}");
                 }
             }
@@ -665,6 +665,40 @@ impl DatabaseRuntime {
         init.writer.shutdown().await;
         init.writer_task.join().await;
         Err(error.to_string())
+    }
+
+    /// Real services for IPC tests, without starting native windows or background workers.
+    #[cfg(test)]
+    pub(crate) async fn initialize_for_test(&self) {
+        std::fs::create_dir_all(&self.app_data_dir).unwrap();
+        let owner = Arc::new(DatabaseOwner::acquire(&self.db_path).unwrap());
+        let access = DbAccess::plaintext(&self.db_path);
+        let init = initialize_context(
+            &self.app_data_dir,
+            &access,
+            owner.clone(),
+            self.profile_id,
+            self.secret_store.clone(),
+            self.sync_state.clone(),
+        )
+        .await
+        .unwrap();
+        *self.owner.lock().unwrap() = Some(owner);
+        *self.live.lock().unwrap() = Some(Live {
+            generation: uuid::Uuid::new_v4(),
+            access,
+            context: Arc::new(init.context),
+            writer: init.writer,
+            writer_task: init.writer_task,
+            workers: vec![],
+        });
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn shutdown_for_test(&self) {
+        let live = self.live.lock().unwrap().take().unwrap();
+        live.writer.shutdown().await;
+        live.writer_task.join().await;
     }
 
     /// Records on disk whether the database this runtime just opened is

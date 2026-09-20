@@ -102,6 +102,15 @@ fn offline_restore_validates_before_replacement_and_preserves_destination_policy
                 [],
             )
             .unwrap();
+        let destination_instance: String = current
+            .connect_rusqlite()
+            .unwrap()
+            .query_row(
+                "SELECT setting_value FROM app_settings WHERE setting_key='instance_id'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         let before = hash(&path);
 
         let owner = db::DatabaseOwner::acquire(current.path()).unwrap();
@@ -144,6 +153,15 @@ fn offline_restore_validates_before_replacement_and_preserves_destination_policy
                 encrypted
             );
             let conn = current.connect_rusqlite().unwrap();
+            assert_eq!(
+                conn.query_row(
+                    "SELECT setting_value FROM app_settings WHERE setting_key='instance_id'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+                destination_instance
+            );
             let amount: String = conn
                 .query_row(
                     "SELECT amount FROM activities WHERE id='test-deposit'",

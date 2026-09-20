@@ -1,4 +1,4 @@
-use crate::profiles::ProfileAccess;
+use crate::profiles::{ConnectAccess, ProfileAccess};
 use tauri::AppHandle;
 use wealthfolio_core::secrets::{
     addon_secret_service_id, legacy_addon_secret_service_id, validate_unscoped_secret_service_id,
@@ -112,7 +112,7 @@ pub async fn delete_addon_secret(
 }
 
 #[tauri::command]
-pub fn get_profile_sync_identity(profile: ProfileAccess) -> Result<Option<String>, String> {
+pub fn get_profile_sync_identity(profile: ConnectAccess) -> Result<Option<String>, String> {
     profile
         .secret_store
         .get_secret(wealthfolio_core::secrets::SYNC_IDENTITY_KEY)
@@ -120,7 +120,7 @@ pub fn get_profile_sync_identity(profile: ProfileAccess) -> Result<Option<String
 }
 #[tauri::command]
 pub fn update_profile_sync_identity(
-    profile: ProfileAccess,
+    profile: ConnectAccess,
     identity: Option<String>,
 ) -> Result<(), String> {
     let identity = identity.ok_or("Use device sync reset to remove enrollment.")?;

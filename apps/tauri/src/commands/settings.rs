@@ -52,6 +52,11 @@ pub async fn update_settings(
     state: ProfileAccess,
     handle: AppHandle,
 ) -> Result<Settings, String> {
+    // Only sync settings participate in Connect account replacement.
+    let _connect = settings_update
+        .sync_enabled
+        .map(|_| state.connect_guard())
+        .transpose()?;
     let context = state.context()?;
     debug!("Updating settings...");
     let service = context.settings_service();

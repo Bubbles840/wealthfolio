@@ -39,16 +39,28 @@ impl TokenLifecycleConfig {
     }
 }
 
-/// Remove destination credentials before an explicit post-restore login can
-/// reopen cloud access. Read back each deletion; a broken key store must leave
-/// the database reconnect gate closed.
-pub fn clear_restored_installation_credentials(store: &dyn SecretStore) -> Result<(), String> {
-    for key in [
-        CLOUD_ACCESS_TOKEN_KEY,
-        CLOUD_REFRESH_TOKEN_KEY,
-        SYNC_IDENTITY_KEY,
-        LEGACY_SYNC_DEVICE_ID_KEY,
-    ] {
+/// A restored database must enroll against a new sync baseline. Keep saved
+/// Connect and provider credentials; the database reconnect gate blocks cloud
+/// access until explicit login. Verify deletion before reopening that gate.
+pub fn clear_restored_sync_identity(store: &dyn SecretStore) -> Result<(), String> {
+    clear_credentials(store, &[SYNC_IDENTITY_KEY, LEGACY_SYNC_DEVICE_ID_KEY])
+}
+
+/// An explicitly confirmed account change also removes the old login.
+fn clear_connect_binding_credentials(store: &dyn SecretStore) -> Result<(), String> {
+    clear_credentials(
+        store,
+        &[
+            CLOUD_ACCESS_TOKEN_KEY,
+            CLOUD_REFRESH_TOKEN_KEY,
+            SYNC_IDENTITY_KEY,
+            LEGACY_SYNC_DEVICE_ID_KEY,
+        ],
+    )
+}
+
+fn clear_credentials(store: &dyn SecretStore, keys: &[&str]) -> Result<(), String> {
+    for key in keys {
         if store.get_secret(key).map_err(|e| e.to_string())?.is_some() {
             store.delete_secret(key).map_err(|e| e.to_string())?;
         }
@@ -137,8 +149,7 @@ impl TokenLifecycleState {
             .requires_cloud_reconnect()
             .map_err(|e| TokenLifecycleError::Internal(e.to_string()))?;
         if reconnect {
-            clear_restored_installation_credentials(store)
-                .map_err(TokenLifecycleError::Internal)?;
+            clear_restored_sync_identity(store).map_err(TokenLifecycleError::Internal)?;
         }
         self.store_session_locked(store, token).await?;
         if reconnect {
@@ -275,7 +286,7 @@ impl TokenLifecycleState {
                 .await
                 .map_err(|e| e.to_string())?;
             cleanup().await?;
-            clear_restored_installation_credentials(store)?;
+            clear_connect_binding_credentials(store)?;
             registry
                 .replace_connect(profile_id, binding)
                 .map_err(|e| e.to_string())?;
@@ -287,7 +298,7 @@ impl TokenLifecycleState {
                 .requires_cloud_reconnect()
                 .map_err(|e| e.to_string())?
             {
-                clear_restored_installation_credentials(store)?;
+                clear_restored_sync_identity(store)?;
             }
         }
         self.store_session_locked(store, &token)
@@ -735,32 +746,41 @@ mod tests {
     use wealthfolio_core::profiles::{DATABASE_KEY_SECRET, PROFILE_LOCK_KEY};
 
     #[test]
-    fn restored_credentials_are_cleared_without_touching_unrelated_secrets() {
+    fn restore_resets_identity_without_touching_saved_credentials() {
         let store = MemorySecrets::default();
-        for key in [
+        let preserved = [
             CLOUD_ACCESS_TOKEN_KEY,
             CLOUD_REFRESH_TOKEN_KEY,
-            SYNC_IDENTITY_KEY,
-            LEGACY_SYNC_DEVICE_ID_KEY,
             DATABASE_KEY_SECRET,
-        ] {
+            "YAHOO",
+            "addon.test.key",
+        ];
+        for key in preserved
+            .into_iter()
+            .chain([SYNC_IDENTITY_KEY, LEGACY_SYNC_DEVICE_ID_KEY])
+        {
             store.set_secret(key, "synthetic secret").unwrap();
         }
-        clear_restored_installation_credentials(&store).unwrap();
-        for key in [
-            CLOUD_ACCESS_TOKEN_KEY,
-            CLOUD_REFRESH_TOKEN_KEY,
-            SYNC_IDENTITY_KEY,
-            LEGACY_SYNC_DEVICE_ID_KEY,
-        ] {
+        clear_restored_sync_identity(&store).unwrap();
+        for key in [SYNC_IDENTITY_KEY, LEGACY_SYNC_DEVICE_ID_KEY] {
+            assert!(store.get_secret(key).unwrap().is_none());
+        }
+        for key in preserved {
+            assert_eq!(
+                store.get_secret(key).unwrap().as_deref(),
+                Some("synthetic secret")
+            );
+        }
+        clear_restored_sync_identity(&store).unwrap();
+        clear_connect_binding_credentials(&store).unwrap();
+        for key in [CLOUD_ACCESS_TOKEN_KEY, CLOUD_REFRESH_TOKEN_KEY] {
             assert!(store.get_secret(key).unwrap().is_none());
         }
         assert!(store.get_secret(DATABASE_KEY_SECRET).unwrap().is_some());
-        clear_restored_installation_credentials(&store).unwrap();
     }
 
     #[test]
-    fn restored_credentials_reject_a_store_that_does_not_delete() {
+    fn restored_identity_rejects_a_store_that_does_not_delete() {
         struct BrokenStore(&'static str);
         impl SecretStore for BrokenStore {
             fn get_secret(&self, key: &str) -> wealthfolio_core::errors::Result<Option<String>> {
@@ -773,13 +793,8 @@ mod tests {
                 Ok(())
             }
         }
-        for key in [
-            CLOUD_ACCESS_TOKEN_KEY,
-            CLOUD_REFRESH_TOKEN_KEY,
-            SYNC_IDENTITY_KEY,
-            LEGACY_SYNC_DEVICE_ID_KEY,
-        ] {
-            assert!(clear_restored_installation_credentials(&BrokenStore(key)).is_err());
+        for key in [SYNC_IDENTITY_KEY, LEGACY_SYNC_DEVICE_ID_KEY] {
+            assert!(clear_restored_sync_identity(&BrokenStore(key)).is_err());
         }
     }
 

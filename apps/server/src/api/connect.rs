@@ -361,17 +361,26 @@ impl SyncProgressReporter for EventBusProgressReporter {
 
 async fn store_sync_session(
     axum::Extension(state): axum::Extension<Arc<AppState>>,
+    axum::Extension(profiles): axum::Extension<Arc<crate::profiles::WebProfiles>>,
+    axum::Extension(access): axum::Extension<crate::profiles::ProfileAccess>,
     Json(body): Json<StoreSyncSessionRequest>,
 ) -> ApiResult<Json<()>> {
-    let _transition = state
-        .connect_transition
-        .clone()
-        .try_write_owned()
-        .map_err(|_| {
-            ApiError::Forbidden(
-                "Profile operations are running. Wait for them to finish and try again.".into(),
-            )
-        })?;
+    let _transition = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        state.connect_transition.clone().write_owned(),
+    )
+    .await
+    .map_err(|_| {
+        ApiError::Forbidden(
+            "Profile operations are running. Wait for them to finish and try again.".into(),
+        )
+    })?;
+    // The browser may have locked or switched profiles while Connect work finished.
+    profiles
+        .registry
+        .sessions
+        .admit(&access.owner, access.session.scope_id)
+        .map_err(|error| ApiError::Forbidden(error.to_string()))?;
     let _sync_lifecycle = state.profile_lifecycle.lock().await;
     ensure_cloud_sync_enabled()?;
     let config = token_lifecycle_config()
@@ -1395,7 +1404,6 @@ async fn cancel_device_snapshot_upload(
 pub fn router<S: Clone + Send + Sync + 'static>() -> Router<S> {
     let router = Router::new()
         // Session management
-        .route("/connect/session", post(store_sync_session))
         .route("/connect/post-login-bootstrap", post(post_login_bootstrap))
         .route("/connect/session", delete(clear_sync_session))
         .route("/connect/session/status", get(get_sync_session_status))
@@ -1475,6 +1483,9 @@ pub fn router<S: Clone + Send + Sync + 'static>() -> Router<S> {
         );
 
     router
+        .route_layer(axum::middleware::from_fn(crate::profiles::admit_connect))
+        // Login owns the exclusive guard; it must not also acquire a shared guard.
+        .route("/connect/session", post(store_sync_session))
 }
 
 #[cfg(test)]

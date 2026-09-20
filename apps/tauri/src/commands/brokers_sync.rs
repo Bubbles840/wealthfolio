@@ -1,6 +1,6 @@
 //! Commands for syncing broker data from the cloud API.
 
-use crate::profiles::ProfileAccess;
+use crate::profiles::ConnectAccess;
 use log::{debug, error, info};
 use std::sync::Arc;
 use tauri::AppHandle;
@@ -109,7 +109,7 @@ impl SyncProgressReporter for TauriProgressReporter {
 /// - `broker:sync-complete` - emitted with SyncResult payload on success
 /// - `broker:sync-error` - emitted with error message on failure
 #[tauri::command]
-pub async fn sync_broker_data(app: AppHandle, state: ProfileAccess) -> Result<(), String> {
+pub async fn sync_broker_data(app: AppHandle, state: ConnectAccess) -> Result<(), String> {
     let context = state.context()?;
     // Check plan entitlement before starting sync
     match context.connect_service().has_broker_sync().await {
@@ -153,7 +153,7 @@ pub async fn sync_broker_data(app: AppHandle, state: ProfileAccess) -> Result<()
 
 /// Alias for `sync_broker_data` using explicit broker-ingest vocabulary.
 #[tauri::command]
-pub async fn broker_ingest_run(app: AppHandle, state: ProfileAccess) -> Result<(), String> {
+pub async fn broker_ingest_run(app: AppHandle, state: ConnectAccess) -> Result<(), String> {
     sync_broker_data(app, state).await
 }
 
@@ -217,7 +217,7 @@ pub(crate) async fn perform_broker_sync_with_guard(
 /// Get all synced accounts
 #[tauri::command]
 pub async fn get_synced_accounts(
-    state: ProfileAccess,
+    state: ConnectAccess,
 ) -> Result<Vec<wealthfolio_core::accounts::Account>, String> {
     let context = state.context()?;
     context
@@ -228,7 +228,7 @@ pub async fn get_synced_accounts(
 
 /// Get all platforms
 #[tauri::command]
-pub async fn get_platforms(state: ProfileAccess) -> Result<Vec<Platform>, String> {
+pub async fn get_platforms(state: ConnectAccess) -> Result<Vec<Platform>, String> {
     let context = state.context()?;
     context
         .sync_service()
@@ -243,7 +243,7 @@ pub async fn get_platforms(state: ProfileAccess) -> Result<Vec<Platform>, String
 /// List broker connections from the cloud API
 #[tauri::command]
 pub async fn list_broker_connections(
-    state: ProfileAccess,
+    state: ConnectAccess,
 ) -> Result<Vec<BrokerConnection>, String> {
     let context = state.context()?;
     debug!("Fetching broker connections from cloud API...");
@@ -257,7 +257,7 @@ pub async fn list_broker_connections(
 /// List broker accounts from the cloud API
 /// Returns the live account data including sync_enabled and owner info
 #[tauri::command]
-pub async fn list_broker_accounts(state: ProfileAccess) -> Result<Vec<BrokerAccount>, String> {
+pub async fn list_broker_accounts(state: ConnectAccess) -> Result<Vec<BrokerAccount>, String> {
     let context = state.context()?;
     debug!("Fetching broker accounts from cloud API...");
 
@@ -276,7 +276,7 @@ pub async fn list_broker_accounts(state: ProfileAccess) -> Result<Vec<BrokerAcco
 
 /// Get subscription plans from the cloud API (requires authentication)
 #[tauri::command]
-pub async fn get_subscription_plans(state: ProfileAccess) -> Result<PlansResponse, String> {
+pub async fn get_subscription_plans(state: ConnectAccess) -> Result<PlansResponse, String> {
     let context = state.context()?;
     debug!("Fetching subscription plans from cloud API...");
 
@@ -313,7 +313,7 @@ pub async fn get_subscription_plans_public() -> Result<PlansResponse, String> {
 
 /// Get current user info from the cloud API
 #[tauri::command]
-pub async fn get_user_info(state: ProfileAccess) -> Result<UserInfo, String> {
+pub async fn get_user_info(state: ConnectAccess) -> Result<UserInfo, String> {
     let context = state.context()?;
     debug!("Fetching user info from cloud API...");
 
@@ -334,7 +334,7 @@ pub async fn get_user_info(state: ProfileAccess) -> Result<UserInfo, String> {
 /// Get all broker sync states
 #[tauri::command]
 pub async fn get_broker_sync_states(
-    state: ProfileAccess,
+    state: ConnectAccess,
 ) -> Result<Vec<wealthfolio_connect::BrokerSyncState>, String> {
     let context = state.context()?;
     debug!("Fetching all broker sync states...");
@@ -347,7 +347,7 @@ pub async fn get_broker_sync_states(
 /// Alias for `get_broker_sync_states` using explicit broker-ingest vocabulary.
 #[tauri::command]
 pub async fn get_broker_ingest_states(
-    state: ProfileAccess,
+    state: ConnectAccess,
 ) -> Result<Vec<wealthfolio_connect::BrokerSyncState>, String> {
     get_broker_sync_states(state).await
 }
@@ -358,7 +358,7 @@ pub async fn get_import_runs(
     run_type: Option<String>,
     limit: Option<i64>,
     offset: Option<i64>,
-    state: ProfileAccess,
+    state: ConnectAccess,
 ) -> Result<Vec<wealthfolio_connect::ImportRun>, String> {
     let context = state.context()?;
     let limit = limit.unwrap_or(50);
@@ -380,7 +380,7 @@ pub async fn get_data_import_runs(
     run_type: Option<String>,
     limit: Option<i64>,
     offset: Option<i64>,
-    state: ProfileAccess,
+    state: ConnectAccess,
 ) -> Result<Vec<wealthfolio_connect::ImportRun>, String> {
     get_import_runs(run_type, limit, offset, state).await
 }
@@ -394,7 +394,7 @@ pub async fn get_data_import_runs(
 pub async fn get_broker_sync_profile(
     account_id: String,
     source_system: String,
-    state: ProfileAccess,
+    state: ConnectAccess,
 ) -> Result<wealthfolio_core::activities::BrokerSyncProfileData, String> {
     let context = state.context()?;
     log::debug!(
@@ -412,7 +412,7 @@ pub async fn get_broker_sync_profile(
 #[tauri::command]
 pub async fn save_broker_sync_profile_rules(
     request: wealthfolio_core::activities::SaveBrokerSyncProfileRulesRequest,
-    state: ProfileAccess,
+    state: ConnectAccess,
 ) -> Result<wealthfolio_core::activities::BrokerSyncProfileData, String> {
     let context = state.context()?;
     log::debug!(

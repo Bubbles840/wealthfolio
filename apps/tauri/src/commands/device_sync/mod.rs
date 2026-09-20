@@ -3,7 +3,7 @@
 //! This module provides Tauri commands that wrap the shared device sync client,
 //! handling token/device ID storage via the keyring.
 
-use crate::profiles::ProfileAccess;
+use crate::profiles::ConnectAccess;
 mod engine;
 mod snapshot;
 
@@ -564,7 +564,7 @@ fn decrypt_sync_payload(
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[tauri::command(rename_all = "camelCase")]
-pub async fn get_device(device_id: Option<String>, state: ProfileAccess) -> Result<Device, String> {
+pub async fn get_device(device_id: Option<String>, state: ConnectAccess) -> Result<Device, String> {
     let context = state.context()?;
     let token = get_access_token(&context).await?;
     let device_id = device_id
@@ -580,7 +580,7 @@ pub async fn get_device(device_id: Option<String>, state: ProfileAccess) -> Resu
 #[tauri::command]
 pub async fn list_devices(
     scope: Option<String>,
-    state: ProfileAccess,
+    state: ConnectAccess,
 ) -> Result<Vec<Device>, String> {
     let context = state.context()?;
     info!("[DeviceSync] Listing devices (scope: {:?})...", scope);
@@ -600,7 +600,7 @@ pub async fn list_devices(
 pub async fn update_device(
     device_id: String,
     display_name: Option<String>,
-    state: ProfileAccess,
+    state: ConnectAccess,
 ) -> Result<SuccessResponse, String> {
     let context = state.context()?;
     info!(
@@ -626,7 +626,7 @@ pub async fn update_device(
 #[tauri::command(rename_all = "camelCase")]
 pub async fn delete_device(
     device_id: String,
-    state: ProfileAccess,
+    state: ConnectAccess,
 ) -> Result<SuccessResponse, String> {
     let context = state.context()?;
     info!("[DeviceSync] Deleting device: {}", device_id);
@@ -642,7 +642,7 @@ pub async fn delete_device(
 #[tauri::command(rename_all = "camelCase")]
 pub async fn revoke_device(
     device_id: String,
-    state: ProfileAccess,
+    state: ConnectAccess,
 ) -> Result<SuccessResponse, String> {
     let context = state.context()?;
     info!("[DeviceSync] Revoking device: {}", device_id);
@@ -662,7 +662,7 @@ pub async fn revoke_device(
 #[tauri::command]
 pub async fn reset_team_sync(
     reason: Option<String>,
-    state: ProfileAccess,
+    state: ConnectAccess,
 ) -> Result<ResetTeamSyncResponse, String> {
     let context = state.context()?;
     info!("[DeviceSync] Resetting team sync...");
@@ -679,7 +679,7 @@ pub async fn reset_team_sync(
 // Engine Status & Tauri Command Wrappers
 // ─────────────────────────────────────────────────────────────────────────────
 
-pub async fn sync_engine_status(state: ProfileAccess) -> Result<SyncEngineStatusResult, String> {
+pub async fn sync_engine_status(state: ConnectAccess) -> Result<SyncEngineStatusResult, String> {
     let context = state.context()?;
     let sync_repo = context.app_sync_repository();
     let status = sync_repo.get_engine_status().map_err(|e| e.to_string())?;
@@ -708,7 +708,7 @@ pub async fn sync_engine_status(state: ProfileAccess) -> Result<SyncEngineStatus
 
 #[tauri::command]
 pub async fn device_sync_bootstrap_overwrite_check(
-    state: ProfileAccess,
+    state: ConnectAccess,
 ) -> Result<SyncBootstrapOverwriteCheckResult, String> {
     let context = state.context()?;
     let sync_repo = context.app_sync_repository();
@@ -763,14 +763,14 @@ pub async fn device_sync_bootstrap_overwrite_check(
     })
 }
 
-pub async fn sync_trigger_cycle(state: ProfileAccess) -> Result<SyncCycleResult, String> {
+pub async fn sync_trigger_cycle(state: ConnectAccess) -> Result<SyncCycleResult, String> {
     let context = state.context()?;
     engine::run_sync_cycle(Arc::clone(&context), false).await
 }
 
 #[tauri::command]
 pub async fn device_sync_start_background_engine(
-    state: ProfileAccess,
+    state: ConnectAccess,
 ) -> Result<SyncBackgroundEngineResult, String> {
     let context = state.context()?;
     ensure_background_engine_started(Arc::clone(&context)).await?;
@@ -791,7 +791,7 @@ pub async fn device_sync_start_background_engine(
 
 #[tauri::command]
 pub async fn device_sync_stop_background_engine(
-    state: ProfileAccess,
+    state: ConnectAccess,
 ) -> Result<SyncBackgroundEngineResult, String> {
     let context = state.context()?;
     ensure_background_engine_stopped(Arc::clone(&context)).await?;
@@ -804,7 +804,7 @@ pub async fn device_sync_stop_background_engine(
 #[tauri::command]
 pub async fn device_sync_generate_snapshot_now(
     handle: AppHandle,
-    state: ProfileAccess,
+    state: ConnectAccess,
 ) -> Result<SyncSnapshotUploadResult, String> {
     let context = state.context()?;
     snapshot::generate_snapshot_now_internal(Some(&handle), Arc::clone(&context)).await
@@ -812,7 +812,7 @@ pub async fn device_sync_generate_snapshot_now(
 
 #[tauri::command]
 pub async fn device_sync_cancel_snapshot_upload(
-    state: ProfileAccess,
+    state: ConnectAccess,
 ) -> Result<SyncBackgroundEngineResult, String> {
     let context = state.context()?;
     context
@@ -827,14 +827,14 @@ pub async fn device_sync_cancel_snapshot_upload(
 
 #[tauri::command]
 pub async fn device_sync_engine_status(
-    state: ProfileAccess,
+    state: ConnectAccess,
 ) -> Result<SyncEngineStatusResult, String> {
     sync_engine_status(state).await
 }
 
 #[tauri::command]
 pub async fn device_sync_pairing_source_status(
-    state: ProfileAccess,
+    state: ConnectAccess,
 ) -> Result<SyncPairingSourceStatusResult, String> {
     let context = state.context()?;
     snapshot::get_pairing_source_status_internal(Arc::clone(&context)).await
@@ -844,7 +844,7 @@ pub async fn device_sync_pairing_source_status(
 pub async fn device_sync_reconcile_ready_state(
     allow_overwrite: bool,
     handle: AppHandle,
-    state: ProfileAccess,
+    state: ConnectAccess,
 ) -> Result<SyncReconcileReadyStateResult, String> {
     let context = state.context()?;
     let device_id = get_device_id_from_store(&context);
@@ -880,7 +880,7 @@ pub async fn device_sync_reconcile_ready_state(
 #[tauri::command]
 pub async fn device_sync_bootstrap_snapshot_if_needed(
     handle: AppHandle,
-    state: ProfileAccess,
+    state: ConnectAccess,
 ) -> Result<SyncBootstrapResult, String> {
     let context = state.context()?;
     let cloned_context = Arc::clone(&context);
@@ -925,7 +925,7 @@ pub async fn device_sync_bootstrap_snapshot_if_needed(
 }
 
 #[tauri::command]
-pub async fn device_sync_trigger_cycle(state: ProfileAccess) -> Result<SyncCycleResult, String> {
+pub async fn device_sync_trigger_cycle(state: ConnectAccess) -> Result<SyncCycleResult, String> {
     sync_trigger_cycle(state).await
 }
 
@@ -937,7 +937,7 @@ pub async fn device_sync_trigger_cycle(state: ProfileAccess) -> Result<SyncCycle
 pub async fn create_pairing(
     code_hash: String,
     ephemeral_public_key: String,
-    state: ProfileAccess,
+    state: ConnectAccess,
 ) -> Result<CreatePairingResponse, String> {
     let context = state.context()?;
     debug!("[DeviceSync] Creating pairing session...");
@@ -962,7 +962,7 @@ pub async fn create_pairing(
 #[tauri::command(rename_all = "camelCase")]
 pub async fn get_pairing(
     pairing_id: String,
-    state: ProfileAccess,
+    state: ConnectAccess,
 ) -> Result<GetPairingResponse, String> {
     let context = state.context()?;
     debug!("[DeviceSync] Getting pairing session: {}", pairing_id);
@@ -980,7 +980,7 @@ pub async fn get_pairing(
 #[tauri::command(rename_all = "camelCase")]
 pub async fn approve_pairing(
     pairing_id: String,
-    state: ProfileAccess,
+    state: ConnectAccess,
 ) -> Result<SuccessResponse, String> {
     let context = state.context()?;
     debug!("[DeviceSync] Approving pairing session: {}", pairing_id);
@@ -1004,7 +1004,7 @@ pub async fn complete_pairing(
     encrypted_key_bundle: String,
     sas_proof: serde_json::Value,
     signature: String,
-    state: ProfileAccess,
+    state: ConnectAccess,
 ) -> Result<CompletePairingResponse, String> {
     let context = state.context()?;
     debug!("[DeviceSync] Completing pairing session: {}", pairing_id);
@@ -1044,7 +1044,7 @@ pub async fn complete_pairing(
 #[tauri::command(rename_all = "camelCase")]
 pub async fn cancel_pairing(
     pairing_id: String,
-    state: ProfileAccess,
+    state: ConnectAccess,
 ) -> Result<SuccessResponse, String> {
     let context = state.context()?;
     debug!("[DeviceSync] Canceling pairing session: {}", pairing_id);
@@ -1067,7 +1067,7 @@ pub async fn cancel_pairing(
 pub async fn claim_pairing(
     code: String,
     ephemeral_public_key: String,
-    state: ProfileAccess,
+    state: ConnectAccess,
 ) -> Result<ClaimPairingResponse, String> {
     let context = state.context()?;
     info!("[DeviceSync] Claiming pairing session...");
@@ -1092,7 +1092,7 @@ pub async fn claim_pairing(
 #[tauri::command(rename_all = "camelCase")]
 pub async fn get_pairing_messages(
     pairing_id: String,
-    state: ProfileAccess,
+    state: ConnectAccess,
 ) -> Result<PairingMessagesResponse, String> {
     let context = state.context()?;
     debug!("[DeviceSync] Polling for pairing messages: {}", pairing_id);
@@ -1124,7 +1124,7 @@ pub async fn complete_pairing_with_transfer(
     sas_proof: serde_json::Value,
     signature: String,
     handle: AppHandle,
-    state: ProfileAccess,
+    state: ConnectAccess,
 ) -> Result<serde_json::Value, String> {
     let context = state.context()?;
     info!("[DeviceSync] complete_pairing_with_transfer: starting");
@@ -1205,7 +1205,7 @@ pub async fn confirm_pairing_with_bootstrap(
     min_snapshot_created_at: Option<String>,
     allow_overwrite: bool,
     handle: AppHandle,
-    state: ProfileAccess,
+    state: ConnectAccess,
 ) -> Result<ConfirmPairingWithBootstrapResult, String> {
     let context = state.context()?;
     info!("[DeviceSync] confirm_pairing_with_bootstrap: starting");
@@ -1357,7 +1357,7 @@ pub async fn begin_pairing_confirm(
     proof: String,
     min_snapshot_created_at: Option<String>,
     handle: AppHandle,
-    state: ProfileAccess,
+    state: ConnectAccess,
 ) -> Result<PairingFlowResponse, String> {
     let context = state.context()?;
     info!("[DeviceSync] begin_pairing_confirm: starting");
@@ -1470,7 +1470,7 @@ pub async fn begin_pairing_confirm(
 pub async fn get_pairing_flow_state(
     flow_id: String,
     handle: AppHandle,
-    state: ProfileAccess,
+    state: ConnectAccess,
 ) -> Result<PairingFlowResponse, String> {
     let context = state.context()?;
     let cloned_context = Arc::clone(&context);
@@ -1544,7 +1544,7 @@ pub async fn get_pairing_flow_state(
 pub async fn approve_pairing_overwrite(
     flow_id: String,
     handle: AppHandle,
-    state: ProfileAccess,
+    state: ConnectAccess,
 ) -> Result<PairingFlowResponse, String> {
     let context = state.context()?;
     let cloned_context = Arc::clone(&context);
@@ -1620,7 +1620,7 @@ pub async fn approve_pairing_overwrite(
 #[tauri::command(rename_all = "camelCase")]
 pub async fn cancel_pairing_flow(
     flow_id: String,
-    state: ProfileAccess,
+    state: ConnectAccess,
 ) -> Result<PairingFlowResponse, String> {
     let context = state.context()?;
     let cloned_context = Arc::clone(&context);
@@ -1643,7 +1643,7 @@ pub async fn confirm_pairing(
     pairing_id: String,
     proof: Option<String>,
     min_snapshot_created_at: Option<String>,
-    state: ProfileAccess,
+    state: ConnectAccess,
 ) -> Result<ConfirmPairingResponse, String> {
     let context = state.context()?;
     info!("[DeviceSync] Confirming pairing: {}", pairing_id);

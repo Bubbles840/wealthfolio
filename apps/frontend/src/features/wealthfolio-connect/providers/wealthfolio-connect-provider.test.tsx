@@ -139,6 +139,36 @@ beforeEach(() => {
 });
 
 describe("Cloud session lifecycle", () => {
+  it.each([
+    [
+      "Profile operations are running. Wait for them to finish and try again.",
+      "profiles.errors.busy",
+    ],
+    [
+      "CONNECT_PROFILE_EXISTS: This Connect account belongs to profile 96b0ce9d-dbbb-484c-abe7-ca2f57e5ccf7.",
+      "profiles.errors.duplicateAccount",
+    ],
+  ])(
+    "shows friendly copy for native session-storage errors after OAuth: %s",
+    async (message, expected) => {
+      mocks.platform = "ios";
+      mocks.store.mockRejectedValueOnce(message);
+      const { result } = await setup();
+
+      act(() => {
+        mocks.onDeepLink({
+          payload: "wealthfolio://auth/callback?code=restore-login#wf_profile_flow=test-flow",
+        });
+      });
+
+      await waitFor(() => expect(result.current.error).toBe(expected));
+      expect(mocks.exchange).toHaveBeenCalledTimes(1);
+      expect(mocks.store).toHaveBeenCalledWith("B");
+      expect(result.current.isConnected).toBe(false);
+      expect(result.current.postLoginSyncRequest).toBeNull();
+    },
+  );
+
   it("requires explicit confirmation before replacing a Connect account", async () => {
     mocks.store.mockRejectedValueOnce(new Error("CONNECT_REBIND_REQUIRED"));
     const { result } = await setup();
@@ -199,6 +229,7 @@ describe("Cloud session lifecycle", () => {
       );
     });
     expect(screen.queryByRole("dialog")).toBeNull();
+    expect(result.current.error).toBe("profiles.errors.duplicateAccount");
     expect(result.current.isConnected).toBe(false);
     expect(mocks.store).toHaveBeenCalledTimes(1);
   });

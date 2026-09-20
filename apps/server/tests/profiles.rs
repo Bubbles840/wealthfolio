@@ -135,7 +135,8 @@ async fn browsers_databases_credentials_and_stale_scopes_are_isolated() {
                         Json(json!("private A response"))
                     }
                 }
-            }),
+            })
+            .layer(middleware::from_fn(profiles::admit_connect)),
         )
         .layer(middleware::from_fn_with_state(
             root.clone(),

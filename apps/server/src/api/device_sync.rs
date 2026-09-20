@@ -644,4 +644,5 @@ pub fn router<S: Clone + Send + Sync + 'static>() -> Router<S> {
             post(approve_pairing_overwrite_endpoint),
         )
         .route("/sync/pairing/flow/cancel", post(cancel_pairing_flow))
+        .route_layer(axum::middleware::from_fn(crate::profiles::admit_connect))
 }

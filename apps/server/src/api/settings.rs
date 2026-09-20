@@ -32,6 +32,11 @@ async fn update_settings(
     axum::Extension(state): axum::Extension<Arc<AppState>>,
     Json(payload): Json<SettingsUpdate>,
 ) -> ApiResult<Json<Settings>> {
+    let _connect = payload
+        .sync_enabled
+        .map(|_| crate::profiles::connect_guard(&state))
+        .transpose()
+        .map_err(crate::error::ApiError::Forbidden)?;
     let previous_base_currency = state.base_currency.read().unwrap().clone();
     let previous_timezone = state.timezone.read().unwrap().clone();
     state.settings_service.update_settings(&payload).await?;

@@ -20,11 +20,38 @@ use serde_json::{json, Value};
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::Mutex;
 use uuid::Uuid;
-use wealthfolio_core::profiles::{ProfileRegistry, PROFILE_SCOPE_HEADER};
+use wealthfolio_core::profiles::{ProfileRegistry, ProfileSession, PROFILE_SCOPE_HEADER};
 
 type Result<T> = std::result::Result<T, (StatusCode, String)>;
 fn failure(error: impl ToString) -> (StatusCode, String) {
     (StatusCode::LOCKED, error.to_string())
+}
+
+/// Original browser grant, retained so a waiting login can revalidate before mutation.
+#[derive(Clone)]
+pub(crate) struct ProfileAccess {
+    pub owner: String,
+    pub session: ProfileSession,
+}
+
+pub(crate) fn connect_guard(
+    state: &AppState,
+) -> std::result::Result<tokio::sync::OwnedRwLockReadGuard<()>, String> {
+    state
+        .connect_transition
+        .clone()
+        .try_read_owned()
+        .map_err(|_| "Connect account change is in progress. Try again.".to_string())
+}
+
+/// Applied by Connect/device-sync routers, after universal profile admission.
+pub async fn admit_connect(
+    Extension(state): Extension<Arc<AppState>>,
+    request: Request<Body>,
+    next: Next,
+) -> Result<Response> {
+    let _guard = connect_guard(&state).map_err(|error| (StatusCode::SERVICE_UNAVAILABLE, error))?;
+    Ok(next.run(request).await)
 }
 
 pub struct WebProfiles {
@@ -551,16 +578,8 @@ async fn command(
         "get_profile_sync_identity" | "update_profile_sync_identity" => {
             let session = admitted()?;
             let runtime = root.runtime(session.profile_id).await?;
-            let _admission = runtime
-                .connect_transition
-                .clone()
-                .try_read_owned()
-                .map_err(|_| {
-                    (
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        "Connect account change is in progress. Try again.".into(),
-                    )
-                })?;
+            let _admission = connect_guard(&runtime)
+                .map_err(|error| (StatusCode::SERVICE_UNAVAILABLE, error))?;
             let profile = registry.profile(session.profile_id).map_err(failure)?;
             let store = registry.secret_store(&profile);
             let key = wealthfolio_core::secrets::SYNC_IDENTITY_KEY;
@@ -619,33 +638,16 @@ pub async fn admit(
     };
     let selected = session.scope_id;
     let state = root.runtime(session.profile_id).await?;
-    // Hold admission through the handler. A confirmed account replacement must
-    // exclude in-flight enrollment, pairing and broker writes using the old token.
-    let _admission = if request.method() == axum::http::Method::POST
-        && request.uri().path().ends_with("/connect/session")
-    {
-        None
-    } else {
-        Some(
-            state
-                .connect_transition
-                .clone()
-                .try_read_owned()
-                .map_err(|_| {
-                    (
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        "Connect account change is in progress. Try again.".into(),
-                    )
-                })?,
-        )
-    };
     request.extensions_mut().insert(state);
     request.extensions_mut().insert(root.clone());
     // A download ticket belongs to this unlock, not just the browser cookie.
     request
         .extensions_mut()
         .insert(BackupSession(format!("{owner}:{selected}")));
-    request.extensions_mut().insert(session);
+    request.extensions_mut().insert(ProfileAccess {
+        owner: owner.clone(),
+        session,
+    });
     let response = next.run(request).await;
     root.registry
         .sessions
@@ -881,86 +883,6 @@ mod tests {
         assert!(!allowed_profile_origin(&headers, &[]));
         headers.append("origin", HeaderValue::from_static("https://evil.test"));
         assert!(!allowed_profile_origin(&headers, &allowed));
-    }
-
-    #[tokio::test]
-    async fn connect_contention_is_retryable_without_revoking_profile() {
-        use axum::routing::get;
-        use tower::ServiceExt;
-        let directory = tempfile::tempdir().unwrap();
-        let config = Config {
-            listen_addr: "127.0.0.1:0".parse().unwrap(),
-            db_path: directory
-                .path()
-                .join("app.db")
-                .to_string_lossy()
-                .into_owned(),
-            cors_allow: vec![],
-            request_timeout: std::time::Duration::from_secs(30),
-            static_dir: "dist".into(),
-            addons_root: directory.path().to_string_lossy().into_owned(),
-            raw_secret_key: vec![7; 32],
-            secrets_encryption_key: [7; 32],
-            database_key: [9; 32],
-            db_encryption_required: false,
-            auth: None,
-            oidc: None,
-            mcp_enabled: false,
-            mcp_audit_enabled: false,
-            mcp_allowed_hosts: None,
-        };
-        let state = crate::build_state(&config).await.unwrap();
-        let root = WebProfiles::new(state.clone(), &config).unwrap();
-        let grant = root
-            .registry
-            .sessions
-            .issue("browser", root.registry.default_id().unwrap(), false, None)
-            .unwrap();
-        let app = Router::new()
-            .route("/financial", get(|| async { "portfolio" }))
-            .layer(axum::middleware::from_fn_with_state(root.clone(), admit))
-            .merge(router(root.clone()))
-            .layer(Extension(BackupSession("browser".into())));
-        let transition = state.connect_transition.clone().write_owned().await;
-        for path in [
-            "/financial",
-            "/profiles/get_profile_sync_identity",
-            "/profiles/update_profile_sync_identity",
-        ] {
-            let request = || {
-                Request::builder()
-                    .uri(path)
-                    .method(if path == "/financial" { "GET" } else { "POST" })
-                    .header("content-type", "application/json")
-                    .header(PROFILE_SCOPE_HEADER, grant.scope_id.to_string())
-                    .body(Body::from("{}"))
-                    .unwrap()
-            };
-            let response = app.clone().oneshot(request()).await.unwrap();
-            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "{path}");
-            assert!(root
-                .registry
-                .sessions
-                .admit("browser", grant.scope_id)
-                .is_ok());
-        }
-        drop(transition);
-        for path in ["/financial", "/profiles/get_profile_sync_identity"] {
-            let response = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .uri(path)
-                        .method(if path == "/financial" { "GET" } else { "POST" })
-                        .header("content-type", "application/json")
-                        .header(PROFILE_SCOPE_HEADER, grant.scope_id.to_string())
-                        .body(Body::from("{}"))
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::OK, "{path}");
-        }
     }
 
     #[test]

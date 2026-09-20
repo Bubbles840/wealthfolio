@@ -8,12 +8,12 @@ use crate::commands::device_sync::{
     get_sync_identity_from_store, sync_identity_can_run_background,
 };
 use crate::context::ServiceContext;
-use crate::profiles::ProfileAccess;
+use crate::profiles::{ConnectAccess, NativeProfiles, ProfileAccess};
 use log::{debug, error};
 use serde::Serialize;
 use std::future::Future;
 use std::sync::Arc;
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 #[cfg(feature = "connect-sync")]
 use wealthfolio_connect::{
     prepare_post_login_broker_bootstrap, BrokerApiClient, PostLoginBrokerBootstrapDecision,
@@ -73,19 +73,20 @@ where
 
 #[tauri::command]
 pub async fn store_sync_session(
+    app: AppHandle,
     refresh_token: String,
     confirm_rebind: Option<bool>,
     state: ProfileAccess,
+    scope_id: uuid::Uuid,
 ) -> Result<(), String> {
     let token = refresh_token.trim();
     if token.is_empty() {
         return Err("Refresh token must not be empty.".into());
     }
-    let _transition = state
-        .connect_transition
-        .clone()
-        .try_write_owned()
-        .map_err(|_| "Profile operations are running. Wait for them to finish and try again.")?;
+    let _transition = app
+        .state::<NativeProfiles>()
+        .begin_connect_transition(scope_id, &state)
+        .await?;
     let context = state.context()?;
     let _sync_lifecycle = context.sync_lifecycle.lock().await;
     // Reserve broker sync for the complete login transition, including cleanup.
@@ -119,7 +120,7 @@ pub async fn store_sync_session(
 #[tauri::command]
 pub async fn post_login_bootstrap(
     app: AppHandle,
-    state: ProfileAccess,
+    state: ConnectAccess,
 ) -> Result<PostLoginBootstrapResult, String> {
     let context = state.context()?;
     let cloned_context = context.clone();
@@ -254,7 +255,7 @@ async fn run_post_login_device_bootstrap(
 }
 
 #[tauri::command]
-pub async fn clear_sync_session(state: ProfileAccess) -> Result<(), String> {
+pub async fn clear_sync_session(state: ConnectAccess) -> Result<(), String> {
     let context = state.context()?;
     disconnect_cloud_session(&context).await
 }
@@ -266,7 +267,7 @@ pub struct SyncSessionStatus {
 }
 
 #[tauri::command]
-pub fn get_sync_session_status(state: ProfileAccess) -> Result<SyncSessionStatus, String> {
+pub fn get_sync_session_status(state: ConnectAccess) -> Result<SyncSessionStatus, String> {
     let context = state.context()?;
     Ok(SyncSessionStatus {
         is_configured: context.connect_service().is_session_configured()?,
@@ -303,7 +304,7 @@ pub struct RestoreSyncSessionResponse {
 
 #[tauri::command]
 pub async fn restore_sync_session(
-    state: ProfileAccess,
+    state: ConnectAccess,
 ) -> Result<RestoreSyncSessionResponse, String> {
     let context = state.context()?;
     let access_token = context.connect_service().get_valid_access_token().await?;

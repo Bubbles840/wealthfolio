@@ -39,6 +39,11 @@ async fn create_account(
     axum::Extension(state): axum::Extension<Arc<AppState>>,
     Json(payload): Json<NewAccount>,
 ) -> ApiResult<Json<Account>> {
+    // A supplied broker link must not race replacement of its Connect identity.
+    let _connect = (payload.provider.is_some() || payload.provider_account_id.is_some())
+        .then(|| crate::profiles::connect_guard(&state))
+        .transpose()
+        .map_err(crate::error::ApiError::Forbidden)?;
     let core_new = payload.into();
     let created = state.account_service.create_account(core_new).await?;
     // Domain events handle portfolio recalculation

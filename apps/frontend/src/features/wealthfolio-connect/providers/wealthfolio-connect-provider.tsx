@@ -1,3 +1,4 @@
+import { profileAwareErrorMessage } from "@/features/profiles/error-messages";
 import { Button } from "@wealthfolio/ui";
 import {
   Dialog,
@@ -383,7 +384,8 @@ function EnabledWealthfolioConnectProvider({ children }: { children: ReactNode }
           processedAuthCodesRef.current.delete(payload.code);
         }
         logger.error(`Error in handleAuthCallback: ${err instanceof Error ? err.message : err}`);
-        setError(err instanceof Error ? err.message : t("connect:authErrors.completeSignInFailed"));
+        const message = err instanceof Error ? err.message : typeof err === "string" ? err : "";
+        setError(message || t("connect:authErrors.completeSignInFailed"));
       }
     },
     [
@@ -902,7 +904,7 @@ function EnabledWealthfolioConnectProvider({ children }: { children: ReactNode }
       teamId,
       userInfo,
       postLoginSyncRequest,
-      error,
+      error: error ? profileAwareErrorMessage(error, t) : error,
       signInWithEmail,
       signUpWithEmail,
       signInWithOAuth,
@@ -934,6 +936,7 @@ function EnabledWealthfolioConnectProvider({ children }: { children: ReactNode }
       clearError,
       refetchUserInfo,
       consumePostLoginSyncRequest,
+      t,
     ],
   );
 

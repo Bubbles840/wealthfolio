@@ -9,6 +9,8 @@ export interface ProfileSummary {
   avatarId: string;
   lockEnabled: boolean;
   isLegacy?: boolean;
+  /** Prior Connect association, independent of the current sign-in session. */
+  hasConnectBinding?: boolean;
 }
 export interface ProfileState {
   profiles: ProfileSummary[];

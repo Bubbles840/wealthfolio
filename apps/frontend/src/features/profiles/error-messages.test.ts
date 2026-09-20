@@ -1,7 +1,7 @@
 import { createInstance } from "i18next";
 import { beforeAll, describe, expect, it } from "vitest";
 import en from "@/i18n/locales/en/common.json";
-import { profileErrorMessage } from "./error-messages";
+import { profileErrorMessage, profileAwareErrorMessage } from "./error-messages";
 
 const i18n = createInstance();
 beforeAll(async () => {
@@ -11,7 +11,7 @@ beforeAll(async () => {
 it.each([
   [
     "PROFILE_ORIGIN_REJECTED: /private/secret/internal-details",
-    "The request origin was rejected. If you self-host Wealthfolio behind a reverse proxy, preserve the public Host header or set WF_CORS_ALLOW_ORIGINS to the exact origin shown in your browser (scheme, hostname, and port).",
+    "We couldn’t connect to this Wealthfolio server. Check the address you’re using or contact the server administrator.",
   ],
   ["PROFILE_LOCKED", "Enter your profile password to continue."],
   ["PROFILE_STALE", "Your session has ended. Unlock your profile again."],
@@ -83,4 +83,23 @@ describe.each(Object.entries(catalogs))("profile translations: %s", (path, catal
       catalog.default.profiles.errors.rebind,
     );
   });
+});
+
+it.each([
+  ["CONNECT_PROFILE_EXISTS: This account belongs to profile secret-uuid", "duplicateAccount"],
+  ["CONNECT_IDENTITY_MISMATCH: internal details", "accountMismatch"],
+  ["CONNECT_TEAM_CHANGED: internal details", "teamChanged"],
+  ["CONNECT_REBIND_REQUIRED: internal details", "rebind"],
+  ["PROFILE_STALE: internal details", "stale"],
+  ["Profile operations are running. Wait for them to finish and try again.", "busy"],
+  ["Connect account change is in progress. Try again.", "busy"],
+] as const)("maps profile errors at existing UI boundaries: %s", (raw, key) => {
+  expect(profileAwareErrorMessage(raw, i18n.getFixedT("en", "common"))).toBe(
+    en.profiles.errors[key],
+  );
+});
+it("preserves unrelated auth copy", () => {
+  expect(
+    profileAwareErrorMessage("Invalid login credentials", i18n.getFixedT("en", "common")),
+  ).toBe("Invalid login credentials");
 });
