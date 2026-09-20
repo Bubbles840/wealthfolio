@@ -88,13 +88,13 @@ records and audit history. Secrets stored in the Keychain or server secret store
 are separate and are not included; credentials embedded in custom configuration
 are included. Exporting does not change the source installation.
 
-Restore resets device-sync enrollment and event bookkeeping, keeps the destination
-installation ID when available, and requires explicit Wealthfolio Connect login
-before cloud sync resumes. Provider settings and saved provider API keys are not
-reset. MCP token records retain their backed-up expiry and revocation status;
-restoring an older backup can therefore reinstate access revoked afterward.
-Earlier portable exports may already have stripped configuration; restore cannot
-recover data absent from those files.
+Restore resets device-sync enrollment and event bookkeeping, keeps the
+destination installation ID when available, and requires explicit Wealthfolio
+Connect login before cloud sync resumes. Provider settings and saved provider
+API keys are not reset. MCP token records retain their backed-up expiry and
+revocation status; restoring an older backup can therefore reinstate access
+revoked afterward. Earlier portable exports may already have stripped
+configuration; restore cannot recover data absent from those files.
 
 **Advanced: original server snapshot → Save original snapshot** downloads the
 original database without portable conversion or a new backup password. It may
