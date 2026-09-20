@@ -37,6 +37,7 @@ use wealthfolio_core::{
     taxonomies::TaxonomyService,
 };
 use wealthfolio_device_sync::{engine::DeviceSyncRuntimeState, DeviceEnrollService};
+use wealthfolio_storage_sqlite::sync::ProfileSyncState;
 use wealthfolio_storage_sqlite::{
     accounts::AccountRepository,
     activities::ActivityRepository,
@@ -83,6 +84,7 @@ pub async fn initialize_context(
     owner: Arc<db::DatabaseOwner>,
     profile_id: uuid::Uuid,
     secret_store: Arc<dyn SecretStore>,
+    sync_state: Arc<ProfileSyncState>,
 ) -> Result<ContextInitResult, Box<dyn std::error::Error>> {
     let migration_access = access.clone();
     let migration_owner = owner.clone();
@@ -93,7 +95,7 @@ pub async fn initialize_context(
     .await??;
 
     let pool = access.create_pool_with_owner(owner)?;
-    initialize_with_pool(app_data_dir, pool, profile_id, secret_store).await
+    initialize_with_pool(app_data_dir, pool, profile_id, secret_store, sync_state).await
 }
 
 async fn initialize_with_pool(
@@ -101,13 +103,15 @@ async fn initialize_with_pool(
     pool: Arc<db::DbPool>,
     profile_id: uuid::Uuid,
     secret_store: Arc<dyn SecretStore>,
+    sync_state: Arc<ProfileSyncState>,
 ) -> Result<ContextInitResult, Box<dyn std::error::Error>> {
     let (sync_outbox_wake_sender, sync_outbox_wake_receiver) = mpsc::channel(128);
-    let (writer, writer_task) = write_actor::spawn_writer_with_outbox_observer(
+    let (writer, writer_task) = write_actor::spawn_writer_with_sync_state(
         pool.as_ref().clone(),
         Arc::new(move || {
             let _ = sync_outbox_wake_sender.try_send(());
         }),
+        sync_state,
     )
     .map_err(|e| {
         error!("Failed to initialize writer actor: {}", e);
@@ -823,7 +827,8 @@ mod initialization_tests {
             directory.path().to_str().unwrap(),
             pool,
             uuid::Uuid::nil(),
-            crate::secret_store::shared_secret_store()
+            crate::secret_store::shared_secret_store(),
+            Arc::default(),
         )
         .await
         .is_err());

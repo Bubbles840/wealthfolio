@@ -563,6 +563,7 @@ export function ProfileShell({ children }: { children: ReactNode }) {
         value={{
           profile: current,
           profileCount: state.profiles.length,
+          profiles: state.profiles,
           addProfile: () => {
             void lock(false, "switch").then((closed) => {
               if (closed) beginCreateProfile();
@@ -582,6 +583,13 @@ export function ProfileShell({ children }: { children: ReactNode }) {
           },
           lockProfile: () => void lock(),
           switchProfile: () => void lock(false, "switch"),
+          selectProfile: (profileId) => {
+            const target = state.profiles.find((profile) => profile.id === profileId);
+            if (!target || target.id === current?.id) return;
+            void lock(false, "switch").then((closed) => {
+              if (closed && target) select(target);
+            });
+          },
         }}
       >
         {children}

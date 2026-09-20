@@ -26,7 +26,8 @@ use crate::schema::{
 };
 use crate::spending::deterministic_ids::preset_rule_deletion_id;
 use crate::sync::broker_activity_patch::{
-    apply_broker_activity_user_patch_tx, BrokerActivityUserPatchApplyOutcome,
+    apply_broker_activity_user_patch_tx, BrokerActivityPatchQueue,
+    BrokerActivityUserPatchApplyOutcome,
 };
 
 use super::model::{
@@ -1978,6 +1979,7 @@ fn mark_table_incremental_applied_tx(conn: &mut SqliteConnection, table_name: &s
 #[allow(clippy::too_many_arguments)]
 fn apply_remote_event_lww_tx(
     conn: &mut SqliteConnection,
+    pending: &BrokerActivityPatchQueue,
     entity: SyncEntity,
     entity_id_value: String,
     op: SyncOperation,
@@ -2028,6 +2030,7 @@ fn apply_remote_event_lww_tx(
                 SyncOperation::Create | SyncOperation::Update => {
                     match apply_broker_activity_user_patch_tx(
                         conn,
+                        pending,
                         &entity_id_value,
                         &event_id_value,
                         &payload_json,
@@ -2747,10 +2750,12 @@ impl AppSyncRepository {
         seq_value: i64,
         payload_json: serde_json::Value,
     ) -> Result<bool> {
+        let sync_state = self.writer.sync_state();
         self.writer
             .exec(move |conn| {
                 apply_remote_event_lww_tx(
                     conn,
+                    &sync_state.broker_activity_patches,
                     entity,
                     entity_id_value.clone(),
                     op,
@@ -2789,6 +2794,7 @@ impl AppSyncRepository {
             return Ok(0);
         }
 
+        let sync_state = self.writer.sync_state();
         self.writer
             .exec(move |conn| {
                 // Defer FK checks during batch replay — events may arrive
@@ -2816,6 +2822,7 @@ impl AppSyncRepository {
                     {
                         if apply_remote_event_lww_tx(
                             conn,
+                            &sync_state.broker_activity_patches,
                             entity,
                             entity_id.clone(),
                             op,
@@ -3534,7 +3541,6 @@ mod tests {
     };
     use crate::sync::broker_activity_patch::{
         broker_activity_identity, broker_activity_user_patch_entity_id,
-        clear_pending_broker_activity_user_patches,
     };
     use wealthfolio_core::accounts::account_types;
     use wealthfolio_core::activities::{ActivityRepositoryTrait, ActivityUpsert};
@@ -3748,7 +3754,7 @@ mod tests {
 
     #[tokio::test]
     async fn broker_activity_user_patch_updates_only_overlay_fields() {
-        let (pool, _writer) = setup_db();
+        let (pool, writer) = setup_db();
         let mut conn = get_connection(&pool).expect("conn");
 
         diesel::sql_query(
@@ -3801,6 +3807,7 @@ mod tests {
 
         let applied = apply_remote_event_lww_tx(
             &mut conn,
+            &writer.sync_state().broker_activity_patches,
             SyncEntity::BrokerActivityUserPatch,
             entity_id,
             SyncOperation::Update,
@@ -3865,7 +3872,6 @@ mod tests {
 
     #[tokio::test]
     async fn broker_activity_user_patch_missing_target_defers_until_broker_import() {
-        clear_pending_broker_activity_user_patches();
         let (pool, writer) = setup_db();
         let mut conn = get_connection(&pool).expect("conn");
 
@@ -3891,6 +3897,7 @@ mod tests {
 
         let applied = apply_remote_event_lww_tx(
             &mut conn,
+            &writer.sync_state().broker_activity_patches,
             SyncEntity::BrokerActivityUserPatch,
             entity_id.clone(),
             SyncOperation::Update,
@@ -4003,7 +4010,6 @@ mod tests {
             .get_result(&mut conn)
             .expect("applied event count after replay");
         assert_eq!(applied_event_count, 1);
-        clear_pending_broker_activity_user_patches();
     }
 
     fn insert_goal_for_test(conn: &mut SqliteConnection, goal_id: &str) -> Result<()> {

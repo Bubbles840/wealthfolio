@@ -30,6 +30,7 @@ use wealthfolio_storage_sqlite::db::{
     DatabaseOwner, DbAccess, DbEncryptionKey, EncryptionPolicy, KeyProvider, WriteHandle,
     WriterTask,
 };
+use wealthfolio_storage_sqlite::sync::ProfileSyncState;
 
 use crate::context::{initialize_context, ServiceContext};
 #[cfg(test)]
@@ -210,6 +211,7 @@ pub struct DatabaseStartupStatus {
 }
 
 pub struct DatabaseRuntime {
+    sync_state: Arc<ProfileSyncState>,
     pub profile_registry: Option<Arc<wealthfolio_core::profiles::ProfileRegistry>>,
     pub profile_id: uuid::Uuid,
     pub connect_transition: Arc<tokio::sync::RwLock<()>>,
@@ -243,6 +245,7 @@ impl DatabaseRuntime {
                 database,
             },
             shared_secret_store(),
+            Arc::default(),
         )
     }
 
@@ -250,8 +253,10 @@ impl DatabaseRuntime {
         profile_id: uuid::Uuid,
         paths: ProfilePaths,
         secret_store: Arc<dyn SecretStore>,
+        sync_state: Arc<ProfileSyncState>,
     ) -> Self {
         Self {
+            sync_state,
             profile_registry: None,
             connect_transition: Arc::new(tokio::sync::RwLock::new(())),
             profile_id,
@@ -606,6 +611,7 @@ impl DatabaseRuntime {
             owner,
             self.profile_id,
             self.secret_store.clone(),
+            self.sync_state.clone(),
         )
         .await
         .map_err(|e| e.to_string())?;
@@ -776,6 +782,7 @@ impl DatabaseRuntime {
             .current_access()?
             .ok_or_else(|| DatabaseUnavailable::NotInitialized.to_string())?;
 
+        let replaces_database = matches!(&request, MaintenanceRequest::Restore { .. });
         let outcome = match self.teardown(handle).await {
             // Two whole-database copies and an integrity scan: seconds to
             // minutes on a large portfolio, and every byte of it blocking file
@@ -799,6 +806,8 @@ impl DatabaseRuntime {
             Err(e) => Err(e),
         };
 
+        let previous_sync_state = (replaces_database && outcome.is_ok())
+            .then(|| self.sync_state.take_for_database_replacement());
         let next_access = match &outcome {
             Ok(outcome) => outcome.access.clone(),
             Err(_) => access.clone(),
@@ -834,6 +843,9 @@ impl DatabaseRuntime {
                     .map_err(|e| {
                         format!("Database rebuild failed ({rebuild_error}); rollback failed: {e}")
                     })?;
+                    if let Some(previous) = previous_sync_state {
+                        self.sync_state.restore_after_database_rollback(previous);
+                    }
                     self.install(handle, access).await.map_err(|e| format!(
                         "The previous database was restored, but its services could not restart: {e}. Restart the application."
                     ))?;
@@ -1031,6 +1043,7 @@ impl DatabaseRuntime {
                 result
             }).await.map_err(|e| format!("Database recovery task failed: {e}"))?
                 .map_err(|e| e.to_string())?;
+            runtime.sync_state.clear();
             info!("Original database files preserved in {}", recovered.preserved_directory.display());
             if let Err(error) = runtime.install(&handle, recovered.access).await {
                 *runtime.lock(&runtime.startup_error)? = Some(error.clone());

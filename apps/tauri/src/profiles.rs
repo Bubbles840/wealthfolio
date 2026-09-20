@@ -2,6 +2,7 @@
 use crate::{
     context::ServiceContext, database::DatabaseRuntime, secret_store::shared_secret_store,
 };
+use std::collections::HashMap;
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
     Arc, Mutex,
@@ -9,6 +10,7 @@ use std::sync::{
 use tauri::{AppHandle, Emitter, Manager};
 use uuid::Uuid;
 use wealthfolio_core::profiles::{ProfileError, ProfileRegistry, ProfileSession, ProfileSummary};
+use wealthfolio_storage_sqlite::sync::ProfileSyncState;
 use zeroize::Zeroizing;
 
 pub const NATIVE_OWNER: &str = "main";
@@ -17,7 +19,8 @@ pub const PROFILE_CHANGED: &str = "profile-session-changed";
 pub struct NativeProfiles {
     pub registry: Arc<ProfileRegistry>,
     active: Mutex<Option<Arc<DatabaseRuntime>>>,
-    transition: tokio::sync::Mutex<()>,
+    // Serializes transitions and retains sync state while profiles are locked.
+    lifecycle: tokio::sync::Mutex<HashMap<Uuid, Arc<ProfileSyncState>>>,
     starting: AtomicBool,
     lock_epoch: AtomicU64,
 }
@@ -30,6 +33,23 @@ pub struct ProfileState {
     pub session: Option<ProfileSession>,
     pub starting: bool,
     pub startup_error: Option<String>,
+}
+
+/// Construct each reopened runtime with the state retained by the profile lifecycle.
+fn profile_runtime(
+    registry: &Arc<ProfileRegistry>,
+    id: Uuid,
+    sync_states: &mut HashMap<Uuid, Arc<ProfileSyncState>>,
+) -> Result<DatabaseRuntime, String> {
+    let profile = registry.profile(id).map_err(|e| e.to_string())?;
+    let mut runtime = DatabaseRuntime::for_profile(
+        id,
+        registry.paths(&profile),
+        registry.secret_store(&profile),
+        sync_states.entry(id).or_default().clone(),
+    );
+    runtime.profile_registry = Some(registry.clone());
+    Ok(runtime)
 }
 
 fn portfolio_history_backfill_needed(context: &Arc<ServiceContext>) -> bool {
@@ -121,7 +141,7 @@ impl NativeProfiles {
         Ok(Self {
             registry: Arc::new(registry),
             active: Mutex::new(None),
-            transition: tokio::sync::Mutex::new(()),
+            lifecycle: tokio::sync::Mutex::new(HashMap::new()),
             starting: AtomicBool::new(true),
             lock_epoch: AtomicU64::new(0),
         })
@@ -216,7 +236,7 @@ impl NativeProfiles {
         proof: Option<String>,
     ) -> Result<ProfileSession, String> {
         let epoch = self.lock_epoch.load(Ordering::SeqCst);
-        let _transition = self.transition.lock().await;
+        let mut profile_sync_states = self.lifecycle.lock().await;
         let registry = self.registry.clone();
         let protected = tauri::async_runtime::spawn_blocking(move || {
             let proof = proof.map(Zeroizing::new);
@@ -236,13 +256,7 @@ impl NativeProfiles {
             .auth_flows
             .select(NATIVE_OWNER, id)
             .map_err(|e| e.to_string())?;
-        let profile = self.registry.profile(id).map_err(|e| e.to_string())?;
-        let mut runtime = DatabaseRuntime::for_profile(
-            id,
-            self.registry.paths(&profile),
-            self.registry.secret_store(&profile),
-        );
-        runtime.profile_registry = Some(self.registry.clone());
+        let runtime = profile_runtime(&self.registry, id, &mut profile_sync_states)?;
         let runtime = Arc::new(runtime);
         *self
             .active
@@ -285,7 +299,7 @@ impl NativeProfiles {
             runtime.suspend();
         }
         let _ = handle.emit(PROFILE_CHANGED, ());
-        let _transition = self.transition.lock().await;
+        let _transition = self.lifecycle.lock().await;
         self.registry
             .sessions
             .revoke(NATIVE_OWNER)
@@ -405,7 +419,7 @@ pub async fn delete_profile(
         let state = handle
             .try_state::<NativeProfiles>()
             .ok_or_else(|| ProfileError::Locked.to_string())?;
-        let _transition = state.transition.lock().await;
+        let mut profile_sync_states = state.lifecycle.lock().await;
         if !state.registry.is_deleting(profile_id) {
             let session = state
                 .registry
@@ -436,6 +450,9 @@ pub async fn delete_profile(
                 .active
                 .lock()
                 .map_err(|_| "Profile runtime is unavailable.")? = None;
+        }
+        if let Some(sync_state) = profile_sync_states.remove(&profile_id) {
+            sync_state.clear();
         }
         let registry = state.registry.clone();
         let result =
@@ -606,7 +623,7 @@ pub fn start_lock_monitor(handle: AppHandle) {
             let Some(profiles) = handle.try_state::<NativeProfiles>() else {
                 continue;
             };
-            if profiles.transition.try_lock().is_ok()
+            if profiles.lifecycle.try_lock().is_ok()
                 && !profiles.starting.load(Ordering::SeqCst)
                 && profiles.active().ok().flatten().is_some()
                 && profiles
@@ -681,4 +698,76 @@ pub fn capture_profile_auth_callback(
         .auth_flows
         .capture(NATIVE_OWNER, flow_id, &callback)
         .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod sync_state_tests {
+    use super::*;
+    use wealthfolio_core::secrets::SecretStore;
+
+    #[derive(Default)]
+    struct Secrets(Mutex<HashMap<String, String>>);
+
+    impl SecretStore for Secrets {
+        fn get_secret(&self, key: &str) -> wealthfolio_core::Result<Option<String>> {
+            Ok(self.0.lock().unwrap().get(key).cloned())
+        }
+        fn set_secret(&self, key: &str, value: &str) -> wealthfolio_core::Result<()> {
+            self.0.lock().unwrap().insert(key.into(), value.into());
+            Ok(())
+        }
+        fn delete_secret(&self, key: &str) -> wealthfolio_core::Result<()> {
+            self.0.lock().unwrap().remove(key);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn profile_runtime_reuses_retained_sync_state_and_isolates_other_profiles() {
+        let directory = tempfile::tempdir().unwrap();
+        let registry = Arc::new(
+            ProfileRegistry::open(
+                directory.path().to_path_buf(),
+                directory.path().join("app.db"),
+                Arc::new(Secrets::default()),
+            )
+            .unwrap(),
+        );
+        let a = registry
+            .create("Alice", wealthfolio_core::profiles::PROFILE_AVATARS[0])
+            .unwrap()
+            .id;
+        let b = registry
+            .create("Bob", wealthfolio_core::profiles::PROFILE_AVATARS[1])
+            .unwrap()
+            .id;
+        let mut states = HashMap::new();
+
+        let runtime_a = profile_runtime(&registry, a, &mut states).unwrap();
+        let retained_a = Arc::downgrade(states.get(&a).unwrap());
+        assert_eq!(
+            retained_a.strong_count(),
+            2,
+            "runtime must retain the map's state"
+        );
+        drop(runtime_a);
+        assert_eq!(
+            retained_a.strong_count(),
+            1,
+            "locking must leave retained state alive"
+        );
+
+        let runtime_b = profile_runtime(&registry, b, &mut states).unwrap();
+        assert!(!Arc::ptr_eq(
+            states.get(&a).unwrap(),
+            states.get(&b).unwrap()
+        ));
+        drop(runtime_b);
+        let _reopened_a = profile_runtime(&registry, a, &mut states).unwrap();
+        assert_eq!(
+            retained_a.strong_count(),
+            2,
+            "reopening must reuse the original state"
+        );
+    }
 }

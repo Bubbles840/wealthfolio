@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { ProfileShell } from "./profile-shell";
 import { ProfileMenu } from "./profile-menu";
+import { MobileProfileMenu } from "./mobile-profile-menu";
 const mocks = vi.hoisted(() => ({
   isWeb: true,
   changed: () => {},
@@ -1032,3 +1033,42 @@ it("does not open profile creation when closing the current profile fails", asyn
   expect(await screen.findByText("Couldn’t finish locking")).toBeInTheDocument();
   expect(screen.queryByRole("heading", { name: "Create a profile" })).not.toBeInTheDocument();
 });
+
+it.each([true, false])(
+  "mobile profile selection waits for closing (success: %s)",
+  async (closeSucceeds) => {
+    const family = { ...profile, id: "b", name: "Family" };
+    let finishClose!: () => void;
+    const closing = new Promise<void>((resolve, reject) => {
+      finishClose = () => (closeSucceeds ? resolve() : reject(new Error("Close failed")));
+    });
+    mocks.command.mockImplementation(async (command: string) => {
+      if (command === "lock_profile") return closing;
+      return { ...unlocked, profiles: [profile, family] };
+    });
+    render(
+      <QueryClientProvider client={new QueryClient()}>
+        <ProfileShell>
+          <MobileProfileMenu onAction={() => {}} />
+          <div>Private portfolio</div>
+        </ProfileShell>
+      </QueryClientProvider>,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Family" }));
+    expect(screen.queryByText("Private portfolio")).not.toBeInTheDocument();
+    expect(mocks.command.mock.calls.some(([name]) => name === "unlock_profile")).toBe(false);
+    await act(async () => finishClose());
+    if (closeSucceeds) {
+      await waitFor(() =>
+        expect(mocks.command).toHaveBeenCalledWith("unlock_profile", {
+          profileId: "b",
+          proof: null,
+        }),
+      );
+      await waitFor(() => expect(mocks.reload).toHaveBeenCalledWith({ dashboard: true }));
+    } else {
+      expect(mocks.command.mock.calls.some(([name]) => name === "unlock_profile")).toBe(false);
+      expect(mocks.reload).not.toHaveBeenCalled();
+    }
+  },
+);

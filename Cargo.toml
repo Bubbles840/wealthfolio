@@ -17,6 +17,10 @@ unsafe_code = "forbid"
 [workspace.lints.clippy]
 all = "warn"
 
+[profile.dev]
+# Keep file/line backtraces without full type and variable debug information.
+debug = "line-tables-only"
+
 [workspace.dependencies]
 # Async runtime
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }

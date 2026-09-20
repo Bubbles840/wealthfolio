@@ -83,7 +83,23 @@ test("real A → B → A reloads, different appearance, cross-tab route reset, a
   await page.setViewportSize({ width: 390, height: 844 });
   await page.getByRole("button", { name: "More options" }).click();
   await page.getByRole("button", { name: "Profile menu for Profile A" }).click();
-  await page.getByRole("menuitem", { name: "Lock Wealthfolio" }).click();
+  await expect(page.getByRole("menu")).not.toBeVisible();
+  await expect(page.getByRole("dialog")).toHaveCount(1);
+  await expect(page.getByRole("button", { name: "Profile A", exact: true })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+  await expect(page.getByRole("button", { name: "Profile B", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Add profile", exact: true })).toBeVisible();
+  await page.screenshot({ path: "/tmp/wealthfolio-mobile-profile-menu.png" });
+  await page.getByRole("button", { name: "Back", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Profile menu for Profile A" })).toBeFocused();
+  await page.getByRole("button", { name: "Profile menu for Profile A" }).click();
+  await page.getByRole("button", { name: "Close more menu" }).click();
+  await page.getByRole("button", { name: "More options" }).click();
+  await expect(page.getByRole("heading", { name: "More", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Profile menu for Profile A" }).click();
+  await page.getByRole("button", { name: "Lock Wealthfolio" }).click();
   await expect(page.locator(".app-shell").first()).not.toBeVisible();
   await expect(page.getByRole("heading", { name: "Who's using Wealthfolio?" })).toBeVisible();
   await expect(page.getByRole("dialog")).not.toBeVisible();
@@ -93,6 +109,16 @@ test("real A → B → A reloads, different appearance, cross-tab route reset, a
   await page.getByRole("button", { name: "Unlock", exact: true }).click();
   await expect(page.locator(".app-shell").first()).toBeVisible();
   await expect(page.getByRole("button", { name: "More options" })).toBeVisible();
+  await page.getByRole("button", { name: "More options" }).click();
+  await page.getByRole("button", { name: "Profile menu for Profile A" }).click();
+  await page.getByRole("button", { name: "Profile B", exact: true }).click();
+  await expect(page.locator("body")).toHaveClass(/font-serif/);
+  await page.getByRole("button", { name: "More options" }).click();
+  await page.getByRole("button", { name: "Profile menu for Profile B" }).click();
+  await page.getByRole("button", { name: "Profile A", exact: true }).click();
+  await page.getByLabel("Password", { exact: true }).fill("mobile passphrase");
+  await page.getByRole("button", { name: "Unlock", exact: true }).click();
+  await expect(page.locator("body")).toHaveClass(/font-sans/);
   expect(errors).toEqual([]);
   const unlocked = await command(context, "get_profile_state");
   await command(
