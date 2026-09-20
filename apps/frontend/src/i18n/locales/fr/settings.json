@@ -1582,5 +1582,11 @@
   "backup_display_name": "Sauvegarde du {{date}}",
   "backup_restore_action": "Restaurer",
   "backup_deleting": "Suppression…",
-  "backup_export_description": "Enregistrez cette sauvegarde dans un fichier pour la conserver ailleurs ou la restaurer sur un autre appareil."
+  "backup_export_description": "Enregistrez cette sauvegarde dans un fichier pour la conserver ailleurs ou la restaurer sur un autre appareil.",
+  "backup_open_title": "Ouvrir une sauvegarde",
+  "backup_replace_warning": "Votre portefeuille actuel sera remplacé.",
+  "backup_restore_safeguard": "Vos données actuelles seront d’abord sauvegardées. L’application redémarrera après la restauration.",
+  "backup_password_optional": "Laissez vide si la sauvegarde n’a pas de mot de passe.",
+  "backup_restore_success_help": "Votre portefeuille est restauré. Redémarrage de Wealthfolio…",
+  "backup_password_help_title": "À propos des mots de passe"
 }

@@ -1582,5 +1582,11 @@
   "backup_display_name": "Copia del {{date}}",
   "backup_restore_action": "Restaurar",
   "backup_deleting": "Eliminando…",
-  "backup_export_description": "Guarda esta copia de seguridad como archivo para conservarla en otro lugar o restaurarla en otro dispositivo."
+  "backup_export_description": "Guarda esta copia de seguridad como archivo para conservarla en otro lugar o restaurarla en otro dispositivo.",
+  "backup_open_title": "Abrir copia de seguridad",
+  "backup_replace_warning": "Se reemplazará tu cartera actual.",
+  "backup_restore_safeguard": "Primero se guardará una copia de tus datos actuales. La aplicación se reiniciará tras la restauración.",
+  "backup_password_optional": "Déjalo en blanco si la copia no tiene contraseña.",
+  "backup_restore_success_help": "Tu cartera se ha restaurado. Reiniciando Wealthfolio…",
+  "backup_password_help_title": "Acerca de las contraseñas"
 }

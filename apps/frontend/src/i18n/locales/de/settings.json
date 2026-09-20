@@ -1540,5 +1540,11 @@
   "backup_display_name": "Sicherung vom {{date}}",
   "backup_restore_action": "Wiederherstellen",
   "backup_deleting": "Wird gelöscht…",
-  "backup_export_description": "Speichern Sie diese Sicherung als Datei, um sie an einem anderen Ort aufzubewahren oder auf einem anderen Gerät wiederherzustellen."
+  "backup_export_description": "Speichern Sie diese Sicherung als Datei, um sie an einem anderen Ort aufzubewahren oder auf einem anderen Gerät wiederherzustellen.",
+  "backup_open_title": "Backup öffnen",
+  "backup_replace_warning": "Dein aktuelles Portfolio wird ersetzt.",
+  "backup_restore_safeguard": "Zuerst wird ein Backup deiner aktuellen Daten gespeichert. Nach der Wiederherstellung startet die App neu.",
+  "backup_password_optional": "Leer lassen, wenn das Backup kein Passwort hat.",
+  "backup_restore_success_help": "Dein Portfolio wurde wiederhergestellt. Wealthfolio wird neu gestartet…",
+  "backup_password_help_title": "Über Backup-Passwörter"
 }

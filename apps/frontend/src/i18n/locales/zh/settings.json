@@ -1516,5 +1516,11 @@
   "backup_display_name": "{{date}}的备份",
   "backup_restore_action": "恢复",
   "backup_deleting": "正在删除…",
-  "backup_export_description": "将此备份保存为文件，以便在其他地方保管或在其他设备上恢复。"
+  "backup_export_description": "将此备份保存为文件，以便在其他地方保管或在其他设备上恢复。",
+  "backup_open_title": "打开备份",
+  "backup_replace_warning": "这将替换您当前的投资组合。",
+  "backup_restore_safeguard": "系统会先备份您当前的数据。恢复后应用将重新启动。",
+  "backup_password_optional": "如果备份没有密码，请留空。",
+  "backup_restore_success_help": "您的投资组合已恢复。正在重新启动 Wealthfolio…",
+  "backup_password_help_title": "关于备份密码"
 }

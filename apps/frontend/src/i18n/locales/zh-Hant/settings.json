@@ -1540,5 +1540,11 @@
   "backup_display_name": "{{date}}的備份",
   "backup_restore_action": "還原",
   "backup_deleting": "正在刪除…",
-  "backup_export_description": "將此備份儲存為檔案，以便存放在其他地方或在其他裝置上還原。"
+  "backup_export_description": "將此備份儲存為檔案，以便存放在其他地方或在其他裝置上還原。",
+  "backup_open_title": "開啟備份",
+  "backup_replace_warning": "這將取代您目前的投資組合。",
+  "backup_restore_safeguard": "系統會先備份您目前的資料。還原後應用程式將重新啟動。",
+  "backup_password_optional": "如果備份沒有密碼，請留空。",
+  "backup_restore_success_help": "您的投資組合已還原。正在重新啟動 Wealthfolio…",
+  "backup_password_help_title": "關於備份密碼"
 }

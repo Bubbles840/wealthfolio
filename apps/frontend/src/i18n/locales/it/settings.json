@@ -1582,5 +1582,11 @@
   "backup_display_name": "Backup del {{date}}",
   "backup_restore_action": "Ripristina",
   "backup_deleting": "Eliminazione…",
-  "backup_export_description": "Salva questo backup come file da conservare altrove o ripristinare su un altro dispositivo."
+  "backup_export_description": "Salva questo backup come file da conservare altrove o ripristinare su un altro dispositivo.",
+  "backup_open_title": "Apri backup",
+  "backup_replace_warning": "Il portafoglio attuale verrà sostituito.",
+  "backup_restore_safeguard": "Prima verrà salvato un backup dei dati attuali. L’app si riavvierà dopo il ripristino.",
+  "backup_password_optional": "Lascia vuoto se il backup non ha una password.",
+  "backup_restore_success_help": "Il portafoglio è stato ripristinato. Riavvio di Wealthfolio…",
+  "backup_password_help_title": "Informazioni sulle password"
 }

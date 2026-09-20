@@ -1516,5 +1516,11 @@
   "backup_display_name": "{{date}}のバックアップ",
   "backup_restore_action": "復元",
   "backup_deleting": "削除中…",
-  "backup_export_description": "このバックアップをファイルとして保存し、別の場所に保管したり、他のデバイスで復元したりできます。"
+  "backup_export_description": "このバックアップをファイルとして保存し、別の場所に保管したり、他のデバイスで復元したりできます。",
+  "backup_open_title": "バックアップを開く",
+  "backup_replace_warning": "現在のポートフォリオが置き換えられます。",
+  "backup_restore_safeguard": "最初に現在のデータのバックアップが保存されます。復元後、アプリが再起動します。",
+  "backup_password_optional": "バックアップにパスワードがない場合は空欄にしてください。",
+  "backup_restore_success_help": "ポートフォリオが復元されました。Wealthfolioを再起動しています…",
+  "backup_password_help_title": "バックアップのパスワードについて"
 }

@@ -1540,5 +1540,11 @@
   "backup_display_name": "Backup from {{date}}",
   "backup_restore_action": "Restore",
   "backup_export_description": "Save this backup as a file to keep elsewhere or restore on another device.",
-  "backup_deleting": "Deleting…"
+  "backup_deleting": "Deleting…",
+  "backup_open_title": "Open backup",
+  "backup_replace_warning": "This will replace your current portfolio.",
+  "backup_restore_safeguard": "A backup of your current data is saved first. The app will restart after restoring.",
+  "backup_password_optional": "Leave blank if the backup has no password.",
+  "backup_restore_success_help": "Your portfolio is restored. Restarting Wealthfolio…",
+  "backup_password_help_title": "About backup passwords"
 }
