@@ -18,8 +18,26 @@
 .insights-widget-editing.react-draggable-dragging .insights-widget-content {
   outline-color: var(--primary);
 }
-.insights-dashboard .insights-widget-editing > .react-resizable-handle {
-  opacity: 0.65;
+/* Keep horizontal resizing, but place its grip at the card's bottom-right.
+   The grid item includes 16px of spacing beneath the card. */
+.insights-dashboard .insights-widget-editing > .react-resizable-handle-e {
+  top: auto;
+  bottom: 16px;
+  right: 0;
+  width: 28px;
+  height: 28px;
+  margin-top: 0;
+  transform: none;
+  opacity: 1;
+}
+.insights-dashboard .insights-widget-editing > .react-resizable-handle-e::after {
+  right: 5px;
+  bottom: 5px;
+  width: 8px;
+  height: 8px;
+}
+.insights-dashboard .insights-widget-editing > .react-resizable-handle-e:hover::after {
+  border-color: var(--foreground);
 }
 
 /* Adjacent summary widgets retain the original continuous strip. */
