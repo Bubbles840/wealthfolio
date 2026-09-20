@@ -178,7 +178,10 @@ export function ProfileShell({ children }: { children: ReactNode }) {
           }
         }
       } catch (e) {
-        if (!cancelled && requestEpoch === epoch.current) setError(String(e));
+        if (!cancelled && requestEpoch === epoch.current) {
+          if (isWeb && phaseRef.current === "active") await lock();
+          else setError(String(e));
+        }
       } finally {
         inFlight = false;
         if (refreshPending && !cancelled) {

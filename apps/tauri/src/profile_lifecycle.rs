@@ -71,6 +71,8 @@ pub fn install(handle: &AppHandle) {
         }
     }
     #[cfg(target_os = "windows")]
+    install_windows_sleep_notifications();
+    #[cfg(target_os = "windows")]
     tauri::async_runtime::spawn(async {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -105,6 +107,7 @@ pub fn install(handle: &AppHandle) {
         not(any(target_os = "macos", target_os = "ios", target_os = "android"))
     ))]
     tauri::async_runtime::spawn(async {
+        use futures::StreamExt;
         let Ok(connection) = zbus::Connection::system().await else {
             return;
         };
@@ -118,15 +121,128 @@ pub fn install(handle: &AppHandle) {
         else {
             return;
         };
+        let manager = zbus::Proxy::new(
+            &connection,
+            "org.freedesktop.login1",
+            "/org/freedesktop/login1",
+            "org.freedesktop.login1.Manager",
+        )
+        .await;
+        let mut sleep_signals = match manager.as_ref() {
+            Ok(manager) => manager.receive_signal("PrepareForSleep").await.ok(),
+            Err(_) => None,
+        };
+        if sleep_signals.is_none() {
+            log::warn!("Could not subscribe to Linux sleep notifications");
+        }
+        // Subscribe before taking the delay inhibitor. Keep its fd until access
+        // has been revoked, so logind cannot suspend us before request_lock runs.
+        let mut inhibitor = if sleep_signals.is_some() {
+            match manager.as_ref() {
+                Ok(manager) => linux_sleep_inhibitor(manager).await,
+                Err(_) => None,
+            }
+        } else {
+            None
+        };
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            if proxy
-                .get_property::<bool>("LockedHint")
-                .await
-                .unwrap_or(false)
-            {
-                request_lock("Linux session lock");
+            tokio::select! {
+                signal = async {
+                    match sleep_signals.as_mut() {
+                        Some(signals) => signals.next().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    let Some(signal) = signal else {
+                        sleep_signals = None;
+                        inhibitor.take();
+                        continue;
+                    };
+                    if let Ok((sleeping,)) = signal.body().deserialize::<(bool,)>() {
+                        // Resume also revokes if acquiring a delay inhibitor was
+                        // denied, or the pre-suspend notification was delayed.
+                        request_lock("Linux sleep/resume");
+                        inhibitor.take();
+                        if !sleeping {
+                            if let Ok(manager) = manager.as_ref() {
+                                inhibitor = linux_sleep_inhibitor(manager).await;
+                            }
+                        }
+                    }
+                }
+                locked = async {
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    proxy.get_property::<bool>("LockedHint").await.unwrap_or(false)
+                } => {
+                    if locked {
+                        request_lock("Linux session lock");
+                    }
+                }
             }
         }
     });
+}
+
+#[cfg(target_os = "windows")]
+fn install_windows_sleep_notifications() {
+    use windows_sys::Win32::System::Power::{
+        PowerRegisterSuspendResumeNotification, DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        DEVICE_NOTIFY_CALLBACK, PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMESUSPEND, PBT_APMSUSPEND,
+    };
+
+    unsafe extern "system" fn on_power_event(
+        _context: *const core::ffi::c_void,
+        event: u32,
+        _setting: *const core::ffi::c_void,
+    ) -> u32 {
+        if matches!(
+            event,
+            PBT_APMSUSPEND | PBT_APMRESUMEAUTOMATIC | PBT_APMRESUMESUSPEND
+        ) {
+            request_lock("Windows sleep/resume");
+        }
+        0
+    }
+
+    let mut parameters = Box::new(DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS {
+        Callback: Some(on_power_event),
+        Context: std::ptr::null_mut(),
+    });
+    let mut registration = std::ptr::null_mut();
+    // The callback has no borrowed context. Retain its parameters and OS
+    // registration for the application lifetime, like the macOS observers.
+    let result = unsafe {
+        PowerRegisterSuspendResumeNotification(
+            DEVICE_NOTIFY_CALLBACK,
+            (&mut *parameters as *mut DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS).cast(),
+            &mut registration,
+        )
+    };
+    if result == 0 {
+        Box::leak(parameters);
+    } else {
+        log::warn!("Could not subscribe to Windows sleep notifications: {result}");
+    }
+}
+
+#[cfg(all(
+    unix,
+    not(any(target_os = "macos", target_os = "ios", target_os = "android"))
+))]
+async fn linux_sleep_inhibitor(manager: &zbus::Proxy<'_>) -> Option<zbus::zvariant::OwnedFd> {
+    match manager
+        .call(
+            "Inhibit",
+            &("sleep", "Wealthfolio", "Lock protected profiles", "delay"),
+        )
+        .await
+    {
+        Ok(fd) => Some(fd),
+        Err(error) => {
+            log::warn!("Could not delay sleep for profile locking: {error}");
+            None
+        }
+    }
 }

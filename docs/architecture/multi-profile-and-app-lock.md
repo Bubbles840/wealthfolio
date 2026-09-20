@@ -241,6 +241,12 @@ acknowledgement protocol. Android sets `FLAG_SECURE` while backgrounded and
 clears it when the activity resumes. Native lifecycle behavior needs platform
 testing.
 
+Windows uses power suspend/resume callbacks alongside session-lock polling.
+Linux listens to logind's `PrepareForSleep` signal and holds a delay inhibitor
+until access is revoked; it reacquires that handle on resume. If logind denies
+the inhibitor, the listener still revokes on resume. Linux sleep/session-lock
+integration requires logind; missing sleep subscriptions are logged.
+
 ### Self-hosted web
 
 A root manager owns the registry, shared vault, runtime lookup, and browser
@@ -253,6 +259,14 @@ stable `sid` values own grants; no-auth mode uses a unique opaque HttpOnly
 browser cookie. Tabs sharing an owner share lock/switch state. Other browsers
 remain independent. Profile lock does not log out instance authentication or
 stop server sync workers.
+
+The web shell closes its financial view when an active profile-state poll fails,
+including after a ten-second request timeout. This reuses the normal lock flow
+and clears cached financial queries. If the backend cannot be reached, the view
+stays closed and Retry completes backend locking after reconnection. Lock
+requests also time out after ten seconds so Retry remains available. This
+connectivity rule applies to all open web profiles; backend idle expiry remains
+independent of browser polling.
 
 Middleware validates the browser owner and `x-wf-profile-scope`, then injects
 the fixed runtime into request extensions. SSE uses the cookie plus a non-secret
@@ -444,6 +458,13 @@ Connect credentials unchanged. Browser and unit tests alone do not establish
 these guarantees. The previously reported intermittent native white window still
 needs a runtime reproduction before its exact cause or resolution can be
 asserted.
+
+For Windows and Linux sleep regression checks, unlock a protected profile,
+suspend without locking the OS session, and resume within one minute. Confirm
+the chooser replaces financial content and the old scope is rejected. Repeat
+with an unprotected profile and confirm it stays open. Test OS session locking
+separately; it does not establish that sleep notifications work. On Linux also
+check the resume fallback when logind denies a delay inhibitor.
 
 ### Avatar artwork and startup
 

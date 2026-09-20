@@ -904,6 +904,38 @@ it("continues polling web profile state", async () => {
   ).toHaveLength(3);
 });
 
+it("hides financial content on a failed idle poll and retries backend locking after reconnect", async () => {
+  vi.useFakeTimers();
+  mocks.command.mockResolvedValue({
+    ...unlocked,
+    profiles: [{ ...profile, lockEnabled: true }],
+  });
+  mount();
+  await act(async () => {});
+  expect(screen.getByText("Private portfolio")).toBeInTheDocument();
+
+  mocks.command.mockRejectedValue(new TypeError("Failed to fetch"));
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(2000);
+  });
+  expect(screen.queryByText("Private portfolio")).not.toBeInTheDocument();
+  expect(mocks.command).toHaveBeenCalledWith("lock_profile", { preserveAuth: false });
+  expect(screen.getByRole("button", { name: "Retry" })).toBeEnabled();
+
+  // A stale, still-valid server grant must not reopen the closed view.
+  mocks.command.mockResolvedValue(unlocked);
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(6000);
+  });
+  expect(screen.queryByText("Private portfolio")).not.toBeInTheDocument();
+  mocks.command.mockResolvedValue(null);
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+  });
+  expect(screen.getByRole("heading", { name: "Who's using Wealthfolio?" })).toBeInTheDocument();
+  expect(screen.queryByText("Private portfolio")).not.toBeInTheDocument();
+});
+
 it("shows cooldown feedback below the unlock button and keeps the password form available", async () => {
   const locked = { ...unlocked, profiles: [{ ...profile, lockEnabled: true }], session: null };
   mocks.command.mockImplementation((command) =>

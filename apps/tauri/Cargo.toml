@@ -131,7 +131,7 @@ features = ["std", "NSWorkspace"]
 
 [target.'cfg(target_os = "windows")'.dependencies.windows-sys]
 version = "0.61"
-features = ["Win32_System_RemoteDesktop"]
+features = ["Win32_System_RemoteDesktop", "Win32_System_Power", "Win32_UI_WindowsAndMessaging"]
 
 [target.'cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android"))))'.dependencies.zbus]
 version = "5"
