@@ -1,3 +1,15 @@
+/* Suppress selection only while a dashboard resize is active. Bundled CSS also
+   works where the native app blocks the drag library's injected stylesheet. */
+body:has(.insights-dashboard .react-grid-item.resizing),
+body:has(.insights-dashboard .react-grid-item.resizing) * {
+  -webkit-user-select: none;
+  user-select: none;
+}
+.insights-dashboard .react-resizable-handle {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
 .insights-widget-content > * {
   min-height: inherit;
 }
