@@ -5,6 +5,7 @@
 use crate::profiles::ProfileAccess;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
+use std::{future::Future, time::Duration};
 use tauri::ipc::Channel;
 use wealthfolio_ai::{
     AiError, AiStreamEvent, ChatMessage, ChatThread, ListThreadsRequest, SendMessageRequest,
@@ -12,6 +13,24 @@ use wealthfolio_ai::{
 };
 
 use super::error::CommandResult;
+
+/// A stalled provider must release its profile context before database teardown
+/// times out. Reuse the runtime's activity flag, including during stream setup.
+async fn while_profile_active<T>(
+    is_active: impl Fn() -> bool,
+    operation: impl Future<Output = T>,
+) -> Option<T> {
+    tokio::pin!(operation);
+    loop {
+        if !is_active() {
+            return None;
+        }
+        tokio::select! {
+            result = &mut operation => return is_active().then_some(result),
+            _ = tokio::time::sleep(Duration::from_millis(250)) => {}
+        }
+    }
+}
 
 /// Request for updating thread title or pinned status.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,13 +63,17 @@ pub async fn stream_ai_chat(
     let context = context.context()?;
     let service = context.ai_chat_service();
 
-    let mut event_stream = service.send_message(request).await?;
+    let Some(stream) =
+        while_profile_active(|| context.is_active(), service.send_message(request)).await
+    else {
+        return Ok(());
+    };
+    let mut event_stream = stream?;
 
     // Stream events to the frontend via the Tauri channel
-    while let Some(event) = event_stream.next().await {
-        if !context.is_active() {
-            break;
-        }
+    while let Some(Some(event)) =
+        while_profile_active(|| context.is_active(), event_stream.next()).await
+    {
         if let Err(e) = on_event.send(crate::events::ProfileEvent {
             scope_id,
             data: event,
@@ -224,4 +247,69 @@ pub async fn update_tool_result(
         )
         .await?;
     Ok(message)
+}
+
+#[cfg(test)]
+mod profile_stream_tests {
+    use super::*;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+
+    #[tokio::test]
+    async fn revocation_drops_pending_stream_setup_and_idle_reads() {
+        for reading_stream in [false, true] {
+            let active = Arc::new(AtomicBool::new(true));
+            let owner = Arc::new(());
+            let held_owner = owner.clone();
+            let task_active = active.clone();
+            let (entered, started) = tokio::sync::oneshot::channel();
+            let task = tokio::spawn(async move {
+                while_profile_active(|| task_active.load(Ordering::SeqCst), async move {
+                    let _owner = held_owner;
+                    entered.send(()).unwrap();
+                    if reading_stream {
+                        futures::stream::pending::<()>().next().await
+                    } else {
+                        std::future::pending::<Option<()>>().await
+                    }
+                })
+                .await
+            });
+            started.await.unwrap();
+            assert_eq!(Arc::strong_count(&owner), 2);
+            active.store(false, Ordering::SeqCst);
+            assert!(tokio::time::timeout(Duration::from_secs(2), task)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_none());
+            assert_eq!(
+                Arc::strong_count(&owner),
+                1,
+                "profile ownership must be released before teardown times out"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn inactive_profiles_do_not_poll_operations_or_deliver_late_results() {
+        assert!(
+            while_profile_active(|| false, async { panic!("must not poll") })
+                .await
+                .is_none()
+        );
+        let active = AtomicBool::new(true);
+        let result = while_profile_active(|| active.load(Ordering::SeqCst), async {
+            active.store(false, Ordering::SeqCst);
+            "late result"
+        })
+        .await;
+        assert!(result.is_none());
+        assert_eq!(
+            while_profile_active(|| true, async { "active result" }).await,
+            Some("active result")
+        );
+    }
 }

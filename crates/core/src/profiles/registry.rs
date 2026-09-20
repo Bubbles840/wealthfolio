@@ -195,12 +195,14 @@ impl ProfileRegistry {
         start_new: bool,
     ) -> ProfileResult<Self> {
         fs::create_dir_all(&root).map_err(storage_error)?;
+        let owner_path = root.join("profiles.lock");
+        let had_owner_file = owner_path.try_exists().map_err(storage_error)?;
         let owner = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
-            .open(root.join("profiles.lock"))
+            .open(owner_path)
             .map_err(storage_error)?;
         owner.try_lock_exclusive().map_err(|_| {
             ProfileError::Unavailable("Another Wealthfolio process owns these profiles.".into())
@@ -273,6 +275,8 @@ impl ProfileRegistry {
                 name: "Personal".into(),
                 avatar_id: DEFAULT_PROFILE_AVATAR.into(),
                 lock_enabled: false,
+                // Lost registry files must not bypass an inherited legacy lock.
+                never_protected: !legacy_database.exists() || !had_owner_file,
                 legacy_database: legacy_database.exists().then_some(legacy_database),
                 legacy_addons_root: None,
                 connect: None,
@@ -574,6 +578,7 @@ impl ProfileRegistry {
             name: name.trim().into(),
             avatar_id: avatar.into(),
             lock_enabled: password.is_some(),
+            never_protected: password.is_none(),
             legacy_database: None,
             legacy_addons_root: None,
             connect: None,
@@ -684,6 +689,9 @@ impl ProfileRegistry {
     }
 
     fn read_lock(&self, profile: &Profile) -> ProfileResult<LockRecord> {
+        if profile.never_protected && !profile.lock_enabled {
+            return Ok(LockRecord::default());
+        }
         match self
             .secret_store(profile)
             .get_secret(PROFILE_LOCK_KEY)
@@ -809,14 +817,25 @@ impl ProfileRegistry {
             .profiles
             .iter()
             .find(|p| p.id == id && !self.is_deleting(id))
+            .cloned()
             .ok_or(ProfileError::NotFound)?;
-        let mut current = self.read_lock(profile)?;
-        self.verify_record(profile, &mut current, proof)?;
+        let mut current = self.read_lock(&profile)?;
+        self.verify_record(&profile, &mut current, proof)?;
         let (record, recovery) = new_lock_record(password)?;
-        self.write_lock(profile, &record)?;
-        // Invalidate before registry I/O: a saved credential change stays effective
-        // even if the display hint cannot be updated.
+
+        // Seal the conservative state in memory and BOTH registry copies before
+        // attempting a credential write. set_secret/readback can fail after the
+        // credential was saved; backup recovery must never skip that credential.
+        data.profiles
+            .iter_mut()
+            .find(|p| p.id == id)
+            .unwrap()
+            .never_protected = false;
+        let encoded = serde_json::to_vec_pretty(&*data).map_err(storage_error)?;
+        atomic_write(&self.root.join(REGISTRY_FILE), &encoded)?;
+        atomic_write(&self.root.join(REGISTRY_BACKUP), &encoded)?;
         self.sessions.revoke_profile(id)?;
+        self.write_lock(&profile, &record)?;
         let mut next = data.clone();
         next.profiles
             .iter_mut()
@@ -906,6 +925,177 @@ mod tests {
             self.0.lock().unwrap().remove(key);
             Ok(())
         }
+    }
+
+    struct UnavailableSecrets;
+    impl SecretStore for UnavailableSecrets {
+        fn get_secret(&self, _: &str) -> crate::Result<Option<String>> {
+            Err(crate::Error::Secret("no Secret Service".into()))
+        }
+        fn set_secret(&self, _: &str, _: &str) -> crate::Result<()> {
+            Err(crate::Error::Secret("no Secret Service".into()))
+        }
+        fn delete_secret(&self, _: &str) -> crate::Result<()> {
+            Err(crate::Error::Secret("no Secret Service".into()))
+        }
+    }
+
+    #[test]
+    fn never_protected_profiles_open_without_a_secret_service() {
+        for legacy in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let database = dir.path().join("app.db");
+            if legacy {
+                fs::write(&database, b"existing database").unwrap();
+            }
+            let registry = ProfileRegistry::open(
+                dir.path().into(),
+                database.clone(),
+                Arc::new(UnavailableSecrets),
+            )
+            .unwrap();
+            let id = registry.default_id().unwrap();
+            assert!(!registry.verify(id, None).unwrap());
+            let second = registry.create("Second", DEFAULT_PROFILE_AVATAR).unwrap();
+            assert!(!registry.verify(second.id, None).unwrap());
+            drop(registry);
+            let registry =
+                ProfileRegistry::open(dir.path().into(), database, Arc::new(UnavailableSecrets))
+                    .unwrap();
+            assert!(!registry.verify(id, None).unwrap());
+            assert!(!registry.verify(second.id, None).unwrap());
+        }
+    }
+
+    #[test]
+    fn lost_legacy_registry_cannot_bypass_an_inherited_password() {
+        let dir = tempfile::tempdir().unwrap();
+        let database = dir.path().join("app.db");
+        fs::write(&database, b"legacy database").unwrap();
+        let secrets = Arc::new(Secrets::default());
+        let registry =
+            ProfileRegistry::open(dir.path().into(), database.clone(), secrets.clone()).unwrap();
+        let id = registry.default_id().unwrap();
+        registry.set_password(id, None, Some("password")).unwrap();
+        drop(registry);
+        fs::remove_file(dir.path().join(REGISTRY_FILE)).unwrap();
+        fs::remove_file(dir.path().join(REGISTRY_BACKUP)).unwrap();
+        let registry = ProfileRegistry::open(dir.path().into(), database, secrets).unwrap();
+        let id = registry.default_id().unwrap();
+        assert!(registry.verify(id, None).is_err());
+        assert!(registry.verify(id, Some("password")).unwrap());
+    }
+
+    #[test]
+    fn old_registry_with_a_stale_hint_still_consults_the_lock_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let database = dir.path().join("app.db");
+        let secrets = Arc::new(Secrets::default());
+        let registry =
+            ProfileRegistry::open(dir.path().into(), database.clone(), secrets.clone()).unwrap();
+        let id = registry.default_id().unwrap();
+        registry.set_password(id, None, Some("password")).unwrap();
+        drop(registry);
+        let mut data: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.path().join(REGISTRY_FILE)).unwrap()).unwrap();
+        data["profiles"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("neverProtected");
+        data["profiles"][0]["lockEnabled"] = false.into();
+        fs::write(
+            dir.path().join(REGISTRY_FILE),
+            serde_json::to_vec(&data).unwrap(),
+        )
+        .unwrap();
+        let registry = ProfileRegistry::open(dir.path().into(), database.clone(), secrets).unwrap();
+        assert!(registry.verify(id, None).is_err());
+        assert!(registry.verify(id, Some("password")).unwrap());
+        drop(registry);
+        let registry =
+            ProfileRegistry::open(dir.path().into(), database, Arc::new(UnavailableSecrets))
+                .unwrap();
+        assert!(registry.verify(id, None).is_err());
+    }
+
+    #[test]
+    fn credential_write_failures_revoke_sessions_and_cannot_restore_keychain_free_access() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        struct FailingSecrets {
+            inner: Secrets,
+            unavailable: AtomicBool,
+            fail_set: bool,
+        }
+        impl SecretStore for FailingSecrets {
+            fn get_secret(&self, key: &str) -> crate::Result<Option<String>> {
+                if self.unavailable.load(Ordering::SeqCst) {
+                    return Err(crate::Error::Secret("readback unavailable".into()));
+                }
+                self.inner.get_secret(key)
+            }
+            fn set_secret(&self, key: &str, value: &str) -> crate::Result<()> {
+                self.inner.set_secret(key, value)?;
+                self.unavailable.store(true, Ordering::SeqCst);
+                if self.fail_set {
+                    return Err(crate::Error::Secret("failed after persistence".into()));
+                }
+                Ok(())
+            }
+            fn delete_secret(&self, key: &str) -> crate::Result<()> {
+                self.inner.delete_secret(key)
+            }
+        }
+        for fail_set in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let database = dir.path().join("app.db");
+            let secrets = Arc::new(FailingSecrets {
+                inner: Secrets::default(),
+                unavailable: AtomicBool::new(false),
+                fail_set,
+            });
+            let registry =
+                ProfileRegistry::open(dir.path().into(), database.clone(), secrets.clone())
+                    .unwrap();
+            let id = registry.default_id().unwrap();
+            registry.sessions.issue("browser", id, false, None).unwrap();
+            assert!(registry.set_password(id, None, Some("password")).is_err());
+            assert!(registry.sessions.current("browser").unwrap().is_none());
+            assert!(registry.verify(id, None).is_err());
+            drop(registry);
+            // A fallback to the last valid registry must not revive the exemption.
+            fs::write(dir.path().join(REGISTRY_FILE), b"corrupt").unwrap();
+            let registry =
+                ProfileRegistry::open(dir.path().into(), database, secrets.clone()).unwrap();
+            assert!(registry.verify(id, None).is_err());
+            secrets.unavailable.store(false, Ordering::SeqCst);
+            assert!(registry.verify(id, None).is_err());
+            assert!(registry.verify(id, Some("password")).unwrap());
+        }
+    }
+
+    #[test]
+    fn failed_registry_sealing_is_retried_before_credentials_are_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let secrets = Arc::new(Secrets::default());
+        let registry = ProfileRegistry::open(
+            dir.path().into(),
+            dir.path().join("app.db"),
+            secrets.clone(),
+        )
+        .unwrap();
+        let id = registry.default_id().unwrap();
+        fs::create_dir(dir.path().join(REGISTRY_BACKUP)).unwrap();
+        assert!(registry.set_password(id, None, Some("password")).is_err());
+        assert!(secrets.0.lock().unwrap().is_empty());
+        assert!(!registry.profile(id).unwrap().never_protected);
+        fs::remove_dir(dir.path().join(REGISTRY_BACKUP)).unwrap();
+        registry.set_password(id, None, Some("password")).unwrap();
+        drop(registry);
+        fs::write(dir.path().join(REGISTRY_FILE), b"corrupt").unwrap();
+        let registry =
+            ProfileRegistry::open(dir.path().into(), dir.path().join("app.db"), secrets).unwrap();
+        assert!(registry.verify(id, None).is_err());
+        assert!(registry.verify(id, Some("password")).unwrap());
     }
 
     #[test]
@@ -1228,6 +1418,7 @@ mod tests {
             registry.verify(id, Some("old passphrase é🔒")),
             Err(ProfileError::Cooldown(_))
         ));
+        let profile = registry.profile(id).unwrap();
         let mut record = registry.read_lock(&profile).unwrap();
         record.next_attempt = 0;
         registry.write_lock(&profile, &record).unwrap();

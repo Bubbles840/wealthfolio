@@ -68,9 +68,10 @@ export function NetWorthContent() {
   });
   const isMobile = useIsMobileViewport();
 
-  const [intervalCode] = usePersistentState<TimePeriod>(INTERVAL_STORAGE_KEY, DEFAULT_INTERVAL);
-
-  const [periodCode, setPeriodCode] = useState<TimePeriod>(intervalCode);
+  const [periodCode, setPeriodCode] = usePersistentState<TimePeriod>(
+    INTERVAL_STORAGE_KEY,
+    DEFAULT_INTERVAL,
+  );
   // A local Date carries the configured calendar day for the date-only interval helper.
   const currentDate = useMemo(() => parseLocalDate(currentDateISO), [currentDateISO]);
   const dateRange = useMemo(
@@ -325,8 +326,7 @@ export function NetWorthContent() {
                 className="pointer-events-auto relative z-20 w-full max-w-screen-sm sm:max-w-screen-md md:max-w-2xl lg:max-w-3xl"
                 onIntervalSelect={handleIntervalSelect}
                 isLoading={isHistoryLoading}
-                storageKey={INTERVAL_STORAGE_KEY}
-                defaultValue={DEFAULT_INTERVAL}
+                value={periodCode}
               />
             </div>
           )}

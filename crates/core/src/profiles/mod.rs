@@ -104,6 +104,10 @@ pub struct Profile {
     pub name: String,
     pub avatar_id: String,
     pub lock_enabled: bool,
+    /// Only explicitly never-protected profiles can open without a secret store.
+    /// Older registries default to consulting the authoritative lock record.
+    #[serde(default)]
+    pub(crate) never_protected: bool,
     /// Only the migrated default may own the pre-profile namespace and database.
     pub legacy_database: Option<PathBuf>,
     #[serde(default)]

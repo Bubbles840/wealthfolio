@@ -87,11 +87,13 @@ pub fn validate_unscoped_secret_service_id(service: &str) -> std::result::Result
         return Err("Secret service id cannot be empty".to_string());
     }
 
-    if service.to_ascii_lowercase().starts_with("addon:") {
+    // Match format_service_id exactly: Unicode aliases (e.g. Kelvin sign → k)
+    // must not reach a reserved credential after passing ASCII-only validation.
+    let normalized = service.to_lowercase();
+    if normalized.starts_with("addon:") {
         return Err("Addon-scoped secrets must use the addon secret API".to_string());
     }
 
-    let normalized = service.to_ascii_lowercase();
     if normalized.starts_with("profile:")
         || [
             crate::profiles::PROFILE_LOCK_KEY,
@@ -142,6 +144,19 @@ pub trait SecretStore: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unicode_aliases_cannot_reach_reserved_credentials() {
+        for (canonical, alias) in [
+            ("profile_lock", "profile_locK"),
+            ("database_encryption_key", "database_encryption_Key"),
+            (CLOUD_REFRESH_TOKEN_KEY, "sync_refresh_toKen"),
+            (CLOUD_ACCESS_TOKEN_KEY, "sync_access_toKen"),
+        ] {
+            assert_eq!(format_service_id(alias), format_service_id(canonical));
+            assert!(validate_unscoped_secret_service_id(alias).is_err());
+        }
+    }
 
     #[test]
     fn stale_pairing_cannot_recreate_or_overwrite_another_enrollment() {
