@@ -1,5 +1,6 @@
 import type { useNetWorthHistory } from "@/hooks/use-alternative-assets";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const queryMocks = vi.hoisted(() => ({
@@ -56,7 +57,7 @@ vi.mock("@wealthfolio/ui", async () => {
     ),
     getInitialIntervalData,
     useNumberFormatting: () => ({}),
-    usePersistentState: () => [intervalMocks.period, vi.fn()],
+    usePersistentState: () => useState(intervalMocks.period),
   };
 });
 vi.mock("@wealthfolio/ui/components/ui/icons", () => ({

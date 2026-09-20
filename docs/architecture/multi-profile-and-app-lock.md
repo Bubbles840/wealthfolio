@@ -117,14 +117,15 @@ attempts. Lock-record writes are read back before success is reported. Registry
 `lockEnabled` is only a display hint: missing or unreadable protected records
 must fail closed.
 
-The registry explicitly marks newly created or first-adopted passwordless profiles
-as `neverProtected`, allowing local plaintext startup without a working native
-credential service. Older registry entries omit this field and still consult the
-credential store. Before the first password write, both registry copies lose this
-exemption; it is never restored, even after a failed write or password removal.
-An existing `profiles.lock` file prevents a legacy database from regaining the
-exemption if both registry files are lost. Credential writes revoke sessions before
-attempting persistence, because a write or readback error can follow a saved change.
+The registry explicitly marks newly created or first-adopted passwordless
+profiles as `neverProtected`, allowing local plaintext startup without a working
+native credential service. Older registry entries omit this field and still
+consult the credential store. Before the first password write, both registry
+copies lose this exemption; it is never restored, even after a failed write or
+password removal. An existing `profiles.lock` file prevents a legacy database
+from regaining the exemption if both registry files are lost. Credential writes
+revoke sessions before attempting persistence, because a write or readback error
+can follow a saved change.
 
 ### Setup, change, disable, and recovery
 
