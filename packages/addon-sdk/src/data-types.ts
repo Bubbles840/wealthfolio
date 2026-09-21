@@ -965,6 +965,8 @@ export interface QuoteUpdate {
 }
 
 export interface Settings {
+  /** Curated palette ID. Optional for compatibility with older hosts. */
+  themeId?: string;
   theme: string;
   font: string;
   baseCurrency: string;

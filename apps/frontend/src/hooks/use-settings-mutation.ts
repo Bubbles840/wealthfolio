@@ -38,7 +38,7 @@ export function useSettingsMutation(
         queryClient.invalidateQueries({ queryKey: [QueryKeys.SAVE_UP_OVERVIEW] });
         queryClient.invalidateQueries({ queryKey: [QueryKeys.SAVE_UP_PREVIEW] });
       }
-      setSettings(updatedSettings);
+      setSettings({ ...updatedSettings, themeId: updatedSettings.themeId ?? "flexoki" });
       await applySettingsToDocument(updatedSettings);
       // Don't show toast during onboarding
       const isOnboarding =

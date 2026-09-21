@@ -7886,6 +7886,10 @@ mod tests {
                     app_settings::setting_key.eq("theme"),
                     app_settings::setting_value.eq("dark"),
                 ),
+                (
+                    app_settings::setting_key.eq("theme_id"),
+                    app_settings::setting_value.eq("future-palette"),
+                ),
             ])
             .execute(&mut conn)
             .expect("insert app settings");
@@ -7912,6 +7916,12 @@ mod tests {
                 .get_result(&mut exported_conn)
                 .expect("count theme setting");
         assert_eq!(theme_count.c, 0);
+        let palette_count: CountRow = diesel::sql_query(
+            "SELECT COUNT(*) AS c FROM app_settings WHERE setting_key = 'theme_id'",
+        )
+        .get_result(&mut exported_conn)
+        .expect("count palette setting");
+        assert_eq!(palette_count.c, 0);
         diesel::insert_into(app_settings::table)
             .values((
                 app_settings::setting_key.eq("theme"),
