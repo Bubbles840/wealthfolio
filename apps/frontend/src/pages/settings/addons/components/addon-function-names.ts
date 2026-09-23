@@ -23,6 +23,9 @@ export const FUNCTION_DISPLAY_NAMES: Record<string, string> = {
   "portfolio.getHistoricalValuations": "View historical portfolio values",
   "portfolio.getLatestValuations": "View current portfolio values",
 
+  // NotificationsAPI functions
+  "notifications.send": "Send push notifications to your devices",
+
   // ActivitiesAPI functions
   "activities.getAll": "View all transactions",
   "activities.search": "Search transactions with filters",

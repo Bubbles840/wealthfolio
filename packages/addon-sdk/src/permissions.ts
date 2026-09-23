@@ -231,6 +231,14 @@ export const PERMISSION_CATEGORIES: PermissionCategory[] = [
     riskLevel: 'low',
   },
   {
+    id: 'notifications',
+    name: 'Push Notifications',
+    description:
+      'Send notifications to devices that enabled push notifications in Settings',
+    functions: ['send'],
+    riskLevel: 'medium',
+  },
+  {
     id: 'network',
     name: 'Network Access',
     description:

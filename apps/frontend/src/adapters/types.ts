@@ -423,6 +423,16 @@ export interface WebPushSubscriptionInput {
 }
 
 /** Outcome of one notification send across every subscribed device. */
+/** A notification to send to every browser that enabled push. */
+export interface NotificationRequest {
+  title: string;
+  body: string;
+  /** Same-origin path opened when the notification is clicked. */
+  url?: string;
+  /** A later notification with the same tag replaces this one. */
+  tag?: string;
+}
+
 export interface NotificationSendReport {
   delivered: number;
   /** Devices the push service reported as gone; the server forgot them. */

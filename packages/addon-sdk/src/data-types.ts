@@ -1432,3 +1432,27 @@ export interface SnapshotImportResult {
   snapshotsFailed: number;
   errors: string[];
 }
+
+/** A push notification an addon sends to every browser that enabled push. */
+export interface NotificationRequest {
+  title: string;
+  body: string;
+  /**
+   * Same-origin path opened when the notification is clicked, e.g.
+   * `/addons/my-addon?tab=reports`. Absolute or cross-origin URLs are refused.
+   */
+  url?: string;
+  /**
+   * A later notification with the same tag replaces this one on the device.
+   * The host scopes it to your addon, so it never collides with another's.
+   */
+  tag?: string;
+}
+
+/** What a send did, per subscribed browser. */
+export interface NotificationSendReport {
+  delivered: number;
+  /** Browsers the push service reported as gone; the server forgot them. */
+  removed: number;
+  failed: number;
+}

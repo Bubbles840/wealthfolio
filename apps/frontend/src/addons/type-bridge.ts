@@ -46,6 +46,7 @@ import type {
   UpdateAssetProfile,
 } from "@/lib/types";
 import type { HoldingInput } from "@/adapters";
+import type { NotificationRequest, NotificationSendReport } from "@/adapters/types";
 import type { AlternativeAssetHolding } from "@/lib/types";
 import type {
   CashActivitySearchRequest,
@@ -214,6 +215,9 @@ export interface InternalHostAPI {
   createActivity(activity: ActivityCreate): Promise<Activity>;
   updateActivity(activity: ActivityUpdate): Promise<Activity>;
   saveActivities(request: ActivityBulkMutationRequest): Promise<ActivityBulkMutationResult>;
+
+  // Push notifications
+  sendNotification(notification: NotificationRequest): Promise<NotificationSendReport>;
 
   // File operations
   openCsvFileDialog(): Promise<null | string | string[]>;
@@ -669,6 +673,22 @@ export function createSDKHostAPIBridge(
     "files",
     guard,
   );
+  const notifications = guardNamespace(
+    {
+      // The tag is scoped to the addon so one addon's notification never
+      // replaces another's, or the host's own, on the user's device.
+      send: (notification: NotificationRequest) =>
+        internalAPI.sendNotification({
+          ...notification,
+          ...(notification.tag
+            ? { tag: `addon:${addonId || "unknown-addon"}:${notification.tag}` }
+            : {}),
+        }),
+    },
+    "notifications",
+    guard,
+  );
+
   const snapshots = guardNamespace(
     {
       getAll: internalAPI.getSnapshots,
@@ -725,6 +745,7 @@ export function createSDKHostAPIBridge(
     settings: settings as unknown as SDKApiWithoutSecrets["settings"],
     files: files as unknown as SDKApiWithoutSecrets["files"],
     snapshots: snapshots as unknown as SDKApiWithoutSecrets["snapshots"],
+    notifications: notifications as unknown as SDKApiWithoutSecrets["notifications"],
 
     logger: createAddonLogger(addonId || "unknown-addon"),
 

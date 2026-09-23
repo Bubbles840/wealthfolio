@@ -136,6 +136,65 @@ describe("Addon Type Bridge", () => {
       expect(getExchangeRatesForDates).toHaveBeenCalledWith(pairs);
     });
 
+    it("sends a push notification with the tag scoped to the addon", async () => {
+      // An addon's tag is prefixed with its id, so one addon's notification can
+      // never replace another's, or the host's own, in the notification tray.
+      const sendNotification = vi.fn().mockResolvedValue({ delivered: 1, removed: 0, failed: 0 });
+      const guard = createPermissionGuard("budget-addon", [
+        {
+          category: "notifications",
+          purpose: "Daily report",
+          functions: [{ name: "send", isDeclared: true, isDetected: false }],
+        },
+      ]);
+      const sdkAPI = createSDKHostAPIBridge(
+        {
+          sendNotification,
+          logError: vi.fn(),
+          logInfo: vi.fn(),
+          logWarn: vi.fn(),
+          logTrace: vi.fn(),
+          logDebug: vi.fn(),
+        } as unknown as InternalHostAPI,
+        "budget-addon",
+        guard,
+      );
+
+      const report = await sdkAPI.notifications.send({
+        title: "Daily report",
+        body: "$42 spent today",
+        url: "/addons/budget-addon?tab=reports",
+        tag: "daily",
+      });
+
+      expect(report).toEqual({ delivered: 1, removed: 0, failed: 0 });
+      expect(sendNotification).toHaveBeenCalledWith({
+        title: "Daily report",
+        body: "$42 spent today",
+        url: "/addons/budget-addon?tab=reports",
+        tag: "addon:budget-addon:daily",
+      });
+    });
+
+    it("denies push notifications without the notifications permission", () => {
+      const sdkAPI = createSDKHostAPIBridge(
+        {
+          sendNotification: vi.fn(),
+          logError: vi.fn(),
+          logInfo: vi.fn(),
+          logWarn: vi.fn(),
+          logTrace: vi.fn(),
+          logDebug: vi.fn(),
+        } as unknown as InternalHostAPI,
+        "budget-addon",
+        createPermissionGuard("budget-addon", []),
+      );
+      expect(() => sdkAPI.notifications.send({ title: "t", body: "b" })).toThrow(
+        "Addon 'budget-addon' is not allowed to call notifications.send",
+      );
+      expect(getPermissionCategory("notifications")?.functions).toEqual(["send"]);
+    });
+
     it("registers historical exchange-rate lookups in currency permissions", () => {
       expect(getPermissionCategory("currency")?.functions).toContain("getRatesForDates");
     });

@@ -715,6 +715,34 @@ to see these APIs in action.
 
 ---
 
+## Notifications API
+
+Send push notifications to the browsers where the user turned notifications on
+(Settings → General → Notifications), even while Wealthfolio is closed.
+Self-hosted web server only; on the desktop app `send` rejects. Requires the
+`notifications` permission.
+
+#### `send(notification: NotificationRequest): Promise<NotificationSendReport>`
+
+- `title`, `body`: the notification text.
+- `url` (optional): a same-origin path opened on click, such as your addon's
+  route. Absolute or cross-origin URLs are refused.
+- `tag` (optional): a later notification with the same tag replaces this one on
+  the device. The host prefixes it with your addon id, so tags never collide
+  across addons.
+
+Resolves with `{ delivered, removed, failed }` counts per browser;
+`delivered: 0` means no browser is subscribed.
+
+```typescript
+await ctx.api.notifications.send({
+  title: "Daily report",
+  body: "$42.10 spent today · $310 left this week",
+  url: "/addons/my-budget?tab=reports&report=daily",
+  tag: "daily-report",
+});
+```
+
 ## Performance API
 
 Calculate portfolio and account performance metrics with historical analysis.

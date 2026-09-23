@@ -45,7 +45,7 @@ import {
 } from "@/adapters";
 import { searchCashActivities } from "@/features/spending/adapters/cash-activities";
 import { getSpendingReport } from "@/features/spending/adapters/reports";
-import { openCsvFileDialog, openFileSaveDialog } from "@/adapters";
+import { openCsvFileDialog, openFileSaveDialog, sendNotification } from "@/adapters";
 import { createGoal, getGoals, getGoalFunding, saveGoalFunding, updateGoal } from "@/adapters";
 import {
   listenFileDrop as listenImportFileDrop,
@@ -539,6 +539,7 @@ export function createAddonHostAPI(
 
       openCsvFileDialog,
       openFileSaveDialog,
+      sendNotification,
 
       listenImportFileDropHover,
       listenImportFileDrop,

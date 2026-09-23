@@ -226,6 +226,7 @@ export {
 // Web Push notifications (self-hosted server; desktop stubs reject)
 export {
   getWebPushPublicKey,
+  sendNotification,
   sendTestNotification,
   subscribeWebPush,
   unsubscribeWebPush,

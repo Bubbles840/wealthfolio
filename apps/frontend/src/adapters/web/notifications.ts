@@ -1,5 +1,9 @@
 // Web adapter - Web Push notifications (self-hosted server)
-import type { NotificationSendReport, WebPushSubscriptionInput } from "../types";
+import type {
+  NotificationRequest,
+  NotificationSendReport,
+  WebPushSubscriptionInput,
+} from "../types";
 import { invoke, logger } from "./core";
 
 export const getWebPushPublicKey = async (): Promise<string> => {
@@ -30,18 +34,21 @@ export const unsubscribeWebPush = async (endpoint: string): Promise<void> => {
   }
 };
 
-export const sendTestNotification = async (
-  title: string,
-  body: string,
+export const sendNotification = async (
+  notification: NotificationRequest,
 ): Promise<NotificationSendReport> => {
   try {
-    return await invoke<NotificationSendReport>("send_notification", {
-      title,
-      body,
-      tag: "wealthfolio-test",
-    });
+    return await invoke<NotificationSendReport>(
+      "send_notification",
+      notification as unknown as Record<string, unknown>,
+    );
   } catch (error) {
-    logger.error("Error sending a test notification.");
+    logger.error("Error sending a notification.");
     throw error;
   }
 };
+
+export const sendTestNotification = (
+  title: string,
+  body: string,
+): Promise<NotificationSendReport> => sendNotification({ title, body, tag: "wealthfolio-test" });

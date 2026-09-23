@@ -5,6 +5,8 @@
 
 import type { EventCallback, UnlistenFn } from './types';
 import type {
+  NotificationRequest,
+  NotificationSendReport,
   Account,
   Activity,
   ActivityBulkMutationRequest,
@@ -988,6 +990,19 @@ export interface SnapshotsAPI {
  * Comprehensive Host API interface providing access to all Wealthfolio functionality
  * Organized by functional domains for better discoverability and maintainability
  */
+/**
+ * Push notifications (self-hosted web server only)
+ */
+export interface NotificationsAPI {
+  /**
+   * Send a push notification to every browser that enabled notifications in
+   * Settings, even while Wealthfolio is closed. Resolves with per-browser
+   * counts; `delivered: 0` means no browser is subscribed. Rejects on the
+   * desktop app, which has no server to push from.
+   */
+  send(notification: NotificationRequest): Promise<NotificationSendReport>;
+}
+
 export interface HostAPI {
   /** Account management operations */
   accounts: AccountsAPI;
@@ -1057,4 +1072,7 @@ export interface HostAPI {
 
   /** Toast notification operations */
   toast: ToastAPI;
+
+  /** Push notifications to the user's devices (self-hosted web server) */
+  notifications: NotificationsAPI;
 }

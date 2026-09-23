@@ -324,6 +324,7 @@ export const ALLOWED_API_METHODS = new Set([
   "portfolio.getIncomeSummary",
   "portfolio.getHistoricalValuations",
   "portfolio.getLatestValuations",
+  "notifications.send",
   "activities.getAll",
   "activities.search",
   "activities.create",

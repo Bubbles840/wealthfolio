@@ -8,6 +8,11 @@ and this project adheres to
 
 ### Added
 
+- `ctx.api.notifications.send({ title, body, url?, tag? })` sends a push
+  notification to every browser that enabled notifications, on the self-hosted
+  web server. Tags are scoped to the addon. Requires the new `notifications`
+  permission.
+
 - `NetworkRequest.timeoutSecs` for longer-running addon HTTP requests. Defaults
   to 10 seconds; positive integer values are capped server-side at 120 seconds.
 
